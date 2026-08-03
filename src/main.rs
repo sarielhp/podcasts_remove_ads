@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use id3::{Tag, TagLike};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::HashMap;
@@ -6,7 +8,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::mpsc::channel;
+use std::time::{Duration, Instant};
 
 const SAMPLE_RATE: u32 = 11025;
 const FFT_SIZE: usize = 1024;
@@ -17,7 +20,7 @@ const MAX_RAW_PEAKS_STORED: usize = 8;
 #[derive(Parser, Debug)]
 #[command(
     name = "podcasts_remove_ads",
-    version,
+    version = "0.2.0",
     about = "Preprocess and cut duplicated intro/outro and sponsor ad segments >= 10s between MP3 podcast files"
 )]
 struct Cli {
@@ -40,6 +43,10 @@ struct Cli {
     #[arg(long = "root-dir", alias = "root_dir", value_name = "DIR")]
     root_dir: Option<PathBuf>,
 
+    /// Flag: Watch directory continuously and automatically process new MP3 files
+    #[arg(long = "watch", value_name = "DIR")]
+    watch: Option<PathBuf>,
+
     /// Preprocessed index (.fp) files used for cut mode
     #[arg(short = 'i', long = "index", value_name = "INDEX_FILES", num_args = 1..)]
     indexes: Vec<PathBuf>,
@@ -55,13 +62,15 @@ struct Cli {
     /// Minimum matching duration in seconds to trigger cut (default: 10.0)
     #[arg(long, default_value_t = 10.0)]
     min_duration: f64,
+
+    /// Enable dry-run mode (analyze and report cuts without modifying files)
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Preprocess one or more MP3 files into raw peak fingerprint files (.fp)
-    ///
-    /// Example: podcasts_remove_ads preprocess "/media/podcasts/The History Hour/ep1.mp3"
     Preprocess {
         /// Input MP3 file(s) path
         #[arg(num_args = 1.., required = true)]
@@ -72,8 +81,6 @@ enum Commands {
         output: Option<PathBuf>,
     },
     /// Cut matching segments >= 10s from target MP3 using reference index files
-    ///
-    /// Example: podcasts_remove_ads cut "/media/podcasts/The History Hour/ep2.mp3" -i "/media/podcasts/The History Hour/ep1.fp"
     Cut {
         /// Target MP3 file to be cut
         input: PathBuf,
@@ -93,10 +100,12 @@ enum Commands {
         /// Minimum matching duration in seconds to cut (default: 10.0)
         #[arg(long, default_value_t = 10.0)]
         min_duration: f64,
+
+        /// Enable dry-run mode (analyze and report cuts without writing MP3)
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Scan directory, preprocess missing files, cut against latest 10 MP3s
-    ///
-    /// Example: podcasts_remove_ads handle_dir "/media/podcasts/The History Hour/"
     #[command(alias = "handle_dir", alias = "handle-dir")]
     HandleDir {
         /// Directory containing MP3 files
@@ -109,13 +118,32 @@ enum Commands {
         /// Minimum matching duration in seconds to cut (default: 10.0)
         #[arg(long, default_value_t = 10.0)]
         min_duration: f64,
+
+        /// Enable dry-run mode (analyze and report cuts without writing MP3)
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Find subdirectories in root directory and execute handle_dir for each one
-    ///
-    /// Example: podcasts_remove_ads root_dir "/media/podcasts/"
     #[command(alias = "root_dir", alias = "root-dir")]
     RootDir {
         /// Parent root directory containing subdirectories of MP3 files
+        dir: PathBuf,
+
+        /// Number of peaks to evaluate during cut phase (1, 2, 4, or 8)
+        #[arg(long, default_value_t = 4)]
+        eval_peaks: usize,
+
+        /// Minimum matching duration in seconds to cut (default: 10.0)
+        #[arg(long, default_value_t = 10.0)]
+        min_duration: f64,
+
+        /// Enable dry-run mode (analyze and report cuts without writing MP3)
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Continuously watch directory for new MP3 downloads and auto-process them
+    Watch {
+        /// Directory to watch for MP3 downloads
         dir: PathBuf,
 
         /// Number of peaks to evaluate during cut phase (1, 2, 4, or 8)
@@ -144,6 +172,16 @@ struct RawAudioPeaksFile {
     duration_secs: f64,
     total_frames: u32,
     frame_peaks: Vec<Vec<u16>>,
+    frame_energies: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct CutSegmentDetails {
+    start_sec: f64,
+    end_sec: f64,
+    duration_sec: f64,
+    match_similarity_pct: f64,
+    reference_file: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -160,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 eval_peaks,
                 min_duration,
+                dry_run,
             } => {
                 let out_path = output.unwrap_or_else(|| {
                     let file_stem = input
@@ -168,21 +207,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or("cut_output");
                     PathBuf::from(format!("{}_cut.mp3", file_stem))
                 });
-                run_cut(&input, &indexes, &out_path, eval_peaks, min_duration)?;
+                run_cut(&input, &indexes, &out_path, eval_peaks, min_duration, dry_run)?;
             }
             Commands::HandleDir {
                 dir,
                 eval_peaks,
                 min_duration,
+                dry_run,
             } => {
-                run_handle_dir(&dir, eval_peaks, min_duration)?;
+                run_handle_dir(&dir, eval_peaks, min_duration, dry_run)?;
             }
             Commands::RootDir {
                 dir,
                 eval_peaks,
                 min_duration,
+                dry_run,
             } => {
-                run_root_dir(&dir, eval_peaks, min_duration)?;
+                run_root_dir(&dir, eval_peaks, min_duration, dry_run)?;
+            }
+            Commands::Watch {
+                dir,
+                eval_peaks,
+                min_duration,
+            } => {
+                run_watch_mode(&dir, eval_peaks, min_duration)?;
             }
             Commands::Benchmark { dir } => {
                 run_benchmark_all(&dir)?;
@@ -202,14 +250,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or("cut_output");
             PathBuf::from(format!("{}_cut.mp3", file_stem))
         });
-        run_cut(&input, &cli.indexes, &out_path, cli.eval_peaks, cli.min_duration)?;
+        run_cut(&input, &cli.indexes, &out_path, cli.eval_peaks, cli.min_duration, cli.dry_run)?;
     } else if let Some(dir) = cli.handle_dir {
-        run_handle_dir(&dir, cli.eval_peaks, cli.min_duration)?;
+        run_handle_dir(&dir, cli.eval_peaks, cli.min_duration, cli.dry_run)?;
     } else if let Some(dir) = cli.root_dir {
-        run_root_dir(&dir, cli.eval_peaks, cli.min_duration)?;
+        run_root_dir(&dir, cli.eval_peaks, cli.min_duration, cli.dry_run)?;
+    } else if let Some(dir) = cli.watch {
+        run_watch_mode(&dir, cli.eval_peaks, cli.min_duration)?;
     } else {
-        eprintln!("Error: Please specify subcommands ('preprocess', 'cut', 'handle_dir', 'root_dir') or flags. Use --help for usage details.");
+        eprintln!("Error: Please specify subcommands or flags. Use --help for usage details.");
         std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn run_watch_mode(
+    dir: &Path,
+    eval_peaks: usize,
+    min_duration: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("===========================================================");
+    println!(" Starting Directory Watcher Mode on {:?}", dir);
+    println!(" Press Ctrl+C to stop watcher.");
+    println!("===========================================================\n");
+
+    // Perform initial run on existing files
+    println!("Performing initial scan on existing files...");
+    let _ = run_handle_dir(dir, eval_peaks, min_duration, false);
+
+    let (tx, rx) = channel();
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+    watcher.watch(dir, RecursiveMode::Recursive)?;
+
+    println!("\n[Watcher Active] Monitoring {:?} for new MP3 downloads...", dir);
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(event)) => match event.kind {
+                EventKind::Create(_) | EventKind::Modify(_) => {
+                    for path in event.paths {
+                        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                            if ext.eq_ignore_ascii_case("mp3") && !path.to_string_lossy().contains("_cut.mp3") {
+                                println!("\n[Watcher Detected New/Modified File] {:?}", path);
+                                std::thread::sleep(Duration::from_millis(1500)); // Allow download buffer to settle
+                                if let Some(parent) = path.parent() {
+                                    let _ = run_handle_dir(parent, eval_peaks, min_duration, false);
+                                } else {
+                                    let _ = run_handle_dir(dir, eval_peaks, min_duration, false);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Err(e)) => eprintln!("Watcher error: {:?}", e),
+            Err(e) => {
+                eprintln!("Watcher channel error: {:?}", e);
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -219,6 +320,7 @@ fn run_root_dir(
     root_dir: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Scanning root directory {:?} for subdirectories...", root_dir);
 
@@ -259,7 +361,7 @@ fn run_root_dir(
             subdir
         );
         println!("===========================================================");
-        run_handle_dir(subdir, eval_peaks, min_duration)?;
+        run_handle_dir(subdir, eval_peaks, min_duration, dry_run)?;
         println!();
     }
 
@@ -282,7 +384,6 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         return Err("No MP3 files found in benchmark directory".into());
     }
 
-    // 1. Run Preprocessing to create new Raw Peak .fp files (storing top 8 peaks/frame)
     let temp_dir = PathBuf::from("scratch/bench_raw_peaks");
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
@@ -308,7 +409,6 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     let preprocess_time_sec = start_preprocess.elapsed().as_secs_f64();
 
-    // Measure total raw peak .fp size across all files
     let mut total_raw_fp_bytes: u64 = 0;
     for mp3_path in &temp_mp3s {
         let mut fp_path = mp3_path.clone();
@@ -323,7 +423,6 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     println!("  -> Total .fp Storage: {:.2} MB (across {} files)", total_raw_fp_size_mb, temp_mp3s.len());
     println!("  -> Preprocessing Time: {:.2} seconds\n", preprocess_time_sec);
 
-    // 2. Benchmark Cut Phase across different evaluated peak counts (1, 2, 4, 8) WITH VERIFICATION
     let peak_eval_configs = [
         (1, "1 Peak (Low Density)", 1.0, 15),
         (2, "2 Peaks (Medium Density)", 2.0, 35),
@@ -341,7 +440,6 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     let mut rows = Vec::new();
 
-    // Add Old Method baseline row from previous empirical baseline measurement
     rows.push(BenchRow {
         method: "OLD METHOD (Pre-computed Pairs on Disk)",
         fp_size_mb: 322.32,
@@ -377,9 +475,9 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
                 .collect();
 
             let target_cut = temp_dir.join(format!("cut_{}_p{}.mp3", i, eval_peaks));
-            let (cut_sec, num_segs) = run_cut_analysis(target_mp3, &ref_fps, &target_cut, eval_peaks, 10.0, min_density, min_hits)?;
+            let (cut_sec, details) = run_cut_analysis(target_mp3, &ref_fps, &target_cut, eval_peaks, 10.0, min_density, min_hits, false)?;
             total_cut_duration_sec += cut_sec;
-            cut_segments_count += num_segs;
+            cut_segments_count += details.len();
         }
 
         rows.push(BenchRow {
@@ -391,10 +489,8 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         });
     }
 
-    // Clean up temp directory
     let _ = fs::remove_dir_all(&temp_dir);
 
-    // Print Final Benchmark Matrix
     println!("\n\n==========================================================================================================");
     println!(" FINAL COMPREHENSIVE BENCHMARK TABLE (Old Method vs New Verified Raw-Peak Method)");
     println!("==========================================================================================================");
@@ -419,7 +515,12 @@ fn run_benchmark_all(source_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn run_handle_dir(dir: &Path, eval_peaks: usize, min_duration: f64) -> Result<(), Box<dyn std::error::Error>> {
+fn run_handle_dir(
+    dir: &Path,
+    eval_peaks: usize,
+    min_duration: f64,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Scanning directory {:?} for MP3 files...", dir);
     let mp3_files = find_mp3_files(dir)?;
 
@@ -466,7 +567,6 @@ fn run_handle_dir(dir: &Path, eval_peaks: usize, min_duration: f64) -> Result<()
         })
         .collect();
 
-    // Sort entries by modification time descending (newest first)
     entries.sort_by(|a, b| b.0.cmp(&a.0));
 
     // Phase 2: Filter pending cut tasks
@@ -483,7 +583,7 @@ fn run_handle_dir(dir: &Path, eval_peaks: usize, min_duration: f64) -> Result<()
             let parent = mp3_path.parent().unwrap_or_else(|| Path::new(""));
             let cut_output_path = parent.join(format!("{}_cut.mp3", file_stem));
 
-            if cut_output_path.exists() {
+            if cut_output_path.exists() && !dry_run {
                 None
             } else {
                 let ref_fps: Vec<PathBuf> = entries
@@ -509,10 +609,10 @@ fn run_handle_dir(dir: &Path, eval_peaks: usize, min_duration: f64) -> Result<()
     if cut_tasks.is_empty() {
         println!("[Cut] All cut files (*_cut.mp3) are up to date!");
     } else {
-        println!("\n=== Starting Parallel Cut Phase for {} file(s) ===", cut_tasks.len());
+        println!("\n=== Starting Parallel Cut Phase for {} file(s) (Dry Run = {}) ===", cut_tasks.len(), dry_run);
         cut_tasks.par_iter().for_each(|task| {
-            println!("  [Cut Thread] Cutting {:?} against {} reference file(s)...", task.mp3_path, task.ref_fps.len());
-            if let Err(e) = run_cut(&task.mp3_path, &task.ref_fps, &task.cut_output_path, eval_peaks, min_duration) {
+            println!("  [Cut Thread] Processing {:?} against {} reference file(s)...", task.mp3_path, task.ref_fps.len());
+            if let Err(e) = run_cut(&task.mp3_path, &task.ref_fps, &task.cut_output_path, eval_peaks, min_duration, dry_run) {
                 eprintln!("Error cutting {:?}: {}", task.mp3_path, e);
             }
         });
@@ -602,7 +702,7 @@ fn run_preprocess_batch(
 }
 
 fn run_preprocess(mp3_path: &Path, output_fp_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (duration_secs, raw_peaks, total_frames) = extract_raw_peaks(mp3_path)?;
+    let (duration_secs, raw_peaks, raw_energies, total_frames) = extract_raw_peaks(mp3_path)?;
 
     save_raw_peaks_file(
         output_fp_path,
@@ -610,6 +710,7 @@ fn run_preprocess(mp3_path: &Path, output_fp_path: &Path) -> Result<(), Box<dyn 
             duration_secs,
             total_frames,
             frame_peaks: raw_peaks,
+            frame_energies: raw_energies,
         },
     )?;
 
@@ -624,6 +725,7 @@ fn run_cut(
     output_mp3: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (min_density, min_hits) = match eval_peaks {
         8 => (5.0, 80),
@@ -632,9 +734,26 @@ fn run_cut(
         _ => (1.0, 15),
     };
 
-    let (cut_duration, _count) = run_cut_analysis(cut_mp3, ref_fp_paths, output_mp3, eval_peaks, min_duration, min_density, min_hits)?;
+    let (cut_duration, details) = run_cut_analysis(cut_mp3, ref_fp_paths, output_mp3, eval_peaks, min_duration, min_density, min_hits, dry_run)?;
 
-    if cut_duration > 0.0 {
+    if dry_run {
+        println!("\n[DRY RUN SUMMARY] Target: {:?}", cut_mp3.file_name().unwrap_or_default());
+        println!("  Total Cut Duration: {:.1} seconds ({:.2} minutes)", cut_duration, cut_duration / 60.0);
+        println!("  Cut Segments Identified: {}", details.len());
+        for (idx, d) in details.iter().enumerate() {
+            println!(
+                "    Segment #{}: [{:02}:{:02} - {:02}:{:02}] ({:.1}s) - {:.1}% Match vs {}",
+                idx + 1,
+                (d.start_sec / 60.0) as u32,
+                (d.start_sec % 60.0) as u32,
+                (d.end_sec / 60.0) as u32,
+                (d.end_sec % 60.0) as u32,
+                d.duration_sec,
+                d.match_similarity_pct,
+                d.reference_file
+            );
+        }
+    } else if cut_duration > 0.0 {
         println!("Successfully generated cut MP3: {:?}", output_mp3);
     }
     Ok(())
@@ -648,10 +767,12 @@ fn run_cut_analysis(
     min_duration: f64,
     min_density: f64,
     min_hits: usize,
-) -> Result<(f64, usize), Box<dyn std::error::Error>> {
+    dry_run: bool,
+) -> Result<(f64, Vec<CutSegmentDetails>), Box<dyn std::error::Error>> {
     // 1. Load raw peak files and generate landmark pair fingerprints on-the-fly in memory
     let mut raw_index: HashMap<u32, Vec<(usize, u32)>> = HashMap::new();
     let mut ref_raw_files = Vec::with_capacity(ref_fp_paths.len());
+    let mut ref_file_names = Vec::with_capacity(ref_fp_paths.len());
 
     for (idx, fp_path) in ref_fp_paths.iter().enumerate() {
         let raw_file = load_raw_peaks_file(fp_path)?;
@@ -662,28 +783,38 @@ fn run_cut_analysis(
                 .or_default()
                 .push((idx, fp.frame));
         }
+        ref_file_names.push(
+            fp_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("ref.fp")
+                .to_string(),
+        );
         ref_raw_files.push(raw_file);
     }
 
     // Filter out over-frequent / non-distinct hashes (stop-word filtering)
     let max_allowed_occurrences = 200;
-    let mut index_map: HashMap<u32, Vec<(usize, u32)>> = HashMap::with_capacity(raw_index.len());
+    let num_refs = ref_fp_paths.len() as f64;
+    let mut index_map: HashMap<u32, (Vec<(usize, u32)>, f64)> = HashMap::with_capacity(raw_index.len());
 
     for (hash, locations) in raw_index {
-        if locations.len() <= max_allowed_occurrences {
-            index_map.insert(hash, locations);
+        let occ = locations.len();
+        if occ <= max_allowed_occurrences {
+            let idf_weight = ((num_refs + 1.0) / (occ as f64 + 1.0)).ln() + 1.0;
+            index_map.insert(hash, (locations, idf_weight));
         }
     }
 
     // 2. Extract raw peaks from query MP3 and generate query fingerprints on-the-fly
-    let (query_duration, query_raw_peaks, _query_frames) = extract_raw_peaks(cut_mp3)?;
+    let (query_duration, query_raw_peaks, query_energies, _query_frames) = extract_raw_peaks(cut_mp3)?;
     let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks, 3, 18);
 
     // 3. Match fingerprints & group by (ref_file_idx, delta)
     let mut matches: HashMap<(usize, i32), Vec<u32>> = HashMap::new();
 
     for q_fp in &query_fingerprints {
-        if let Some(ref_matches) = index_map.get(&q_fp.hash) {
+        if let Some((ref_matches, _idf)) = index_map.get(&q_fp.hash) {
             for &(ref_idx, r_frame) in ref_matches {
                 let delta = r_frame as i32 - q_fp.frame as i32;
                 let delta_q = (delta + 1) / 2 * 2;
@@ -695,9 +826,10 @@ fn run_cut_analysis(
         }
     }
 
-    // 4. Find contiguous matching segments >= min_duration WITH SPECTRAL VERIFICATION
+    // 4. Find contiguous matching segments >= min_duration WITH SPECTRAL VERIFICATION & SILENCE SNAPPING
     let mut raw_cut_intervals: Vec<(f64, f64)> = Vec::new();
-    let frame_time = HOP_SIZE as f64 / SAMPLE_RATE as f64; // ~0.04644 sec per frame
+    let mut cut_details: Vec<CutSegmentDetails> = Vec::new();
+    let frame_time = HOP_SIZE as f64 / SAMPLE_RATE as f64;
 
     for ((ref_idx, delta), mut frames) in matches {
         if frames.len() < 5 {
@@ -719,8 +851,7 @@ fn run_cut_analysis(
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
                 if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits) {
-                    // RUN SPECTRAL VERIFICATION PASS BEFORE CONFIRMING CUT
-                    let is_verified = verify_candidate_segment(
+                    let (is_verified, sim_pct) = verify_candidate_segment_pct(
                         &query_raw_peaks,
                         &ref_raw_files[ref_idx].frame_peaks,
                         cluster_start,
@@ -728,9 +859,21 @@ fn run_cut_analysis(
                         delta,
                     );
                     if is_verified {
-                        let start_t = (cluster_start as f64 * frame_time).max(0.0);
-                        let end_t = ((cluster_end as f64 + 1.0) * frame_time).min(query_duration);
+                        // SILENCE SNAPPING: Adjust cluster boundaries to nearest silence window
+                        let snapped_start = snap_to_silence(&query_energies, cluster_start, true);
+                        let snapped_end = snap_to_silence(&query_energies, cluster_end, false);
+
+                        let start_t = (snapped_start as f64 * frame_time).max(0.0);
+                        let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
+
                         raw_cut_intervals.push((start_t, end_t));
+                        cut_details.push(CutSegmentDetails {
+                            start_sec: start_t,
+                            end_sec: end_t,
+                            duration_sec: end_t - start_t,
+                            match_similarity_pct: sim_pct,
+                            reference_file: ref_file_names[ref_idx].clone(),
+                        });
                     }
                 }
                 cluster_start = f;
@@ -742,8 +885,7 @@ fn run_cut_analysis(
         let dur = (cluster_end - cluster_start) as f64 * frame_time;
         let density = cluster_hits as f64 / dur.max(0.1);
         if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits) {
-            // RUN SPECTRAL VERIFICATION PASS BEFORE CONFIRMING CUT
-            let is_verified = verify_candidate_segment(
+            let (is_verified, sim_pct) = verify_candidate_segment_pct(
                 &query_raw_peaks,
                 &ref_raw_files[ref_idx].frame_peaks,
                 cluster_start,
@@ -751,40 +893,89 @@ fn run_cut_analysis(
                 delta,
             );
             if is_verified {
-                let start_t = (cluster_start as f64 * frame_time).max(0.0);
-                let end_t = ((cluster_end as f64 + 1.0) * frame_time).min(query_duration);
+                let snapped_start = snap_to_silence(&query_energies, cluster_start, true);
+                let snapped_end = snap_to_silence(&query_energies, cluster_end, false);
+
+                let start_t = (snapped_start as f64 * frame_time).max(0.0);
+                let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
+
                 raw_cut_intervals.push((start_t, end_t));
+                cut_details.push(CutSegmentDetails {
+                    start_sec: start_t,
+                    end_sec: end_t,
+                    duration_sec: end_t - start_t,
+                    match_similarity_pct: sim_pct,
+                    reference_file: ref_file_names[ref_idx].clone(),
+                });
             }
         }
     }
 
     // 5. Merge overlapping/adjacent intervals to cut
     let merged_cut_intervals = merge_intervals(raw_cut_intervals, 1.5);
-
     let total_cut_sec: f64 = merged_cut_intervals.iter().map(|(s, e)| e - s).sum();
-    let num_segments = merged_cut_intervals.len();
 
     if merged_cut_intervals.is_empty() {
-        fs::copy(cut_mp3, output_mp3)?;
-        return Ok((0.0, 0));
+        if !dry_run {
+            fs::copy(cut_mp3, output_mp3)?;
+        }
+        return Ok((0.0, Vec::new()));
+    }
+
+    if dry_run {
+        return Ok((total_cut_sec, cut_details));
     }
 
     // 6. Compute keep intervals
     let keep_intervals = invert_intervals(&merged_cut_intervals, query_duration);
 
-    // 7. Perform audio cutting via FFmpeg
-    splice_audio_ffmpeg(cut_mp3, &keep_intervals, output_mp3)?;
+    // 7. Perform audio cutting via FFmpeg WITH EQUAL-POWER MICRO CROSS-FADING
+    splice_audio_ffmpeg_crossfade(cut_mp3, &keep_intervals, output_mp3)?;
 
-    Ok((total_cut_sec, num_segments))
+    // 8. Transfer ID3 metadata & embedded cover art to output MP3
+    let _ = copy_id3_tags_and_art(cut_mp3, output_mp3);
+
+    // 9. Generate HTML Inspection Report
+    let report_html_path = output_mp3.with_extension("report.html");
+    let _ = generate_html_report(cut_mp3, &cut_details, &merged_cut_intervals, query_duration, total_cut_sec, &report_html_path);
+
+    Ok((total_cut_sec, cut_details))
 }
 
-fn verify_candidate_segment(
+fn snap_to_silence(energies: &[f32], target_frame: u32, is_start_boundary: bool) -> u32 {
+    let window_size = 10; // +/- 10 frames (~0.46s search window)
+    let tf = target_frame as usize;
+    if tf >= energies.len() {
+        return target_frame;
+    }
+
+    let search_start = tf.saturating_sub(window_size);
+    let search_end = (tf + window_size).min(energies.len() - 1);
+
+    let mut min_energy = energies[tf];
+    let mut min_frame = target_frame;
+
+    for f in search_start..=search_end {
+        if energies[f] < min_energy {
+            min_energy = energies[f];
+            min_frame = f as u32;
+        }
+    }
+
+    if is_start_boundary {
+        min_frame
+    } else {
+        min_frame
+    }
+}
+
+fn verify_candidate_segment_pct(
     query_peaks: &[Vec<u16>],
     ref_peaks: &[Vec<u16>],
     cluster_start_frame: u32,
     cluster_end_frame: u32,
     delta: i32,
-) -> bool {
+) -> (bool, f64) {
     let mut total_compared = 0;
     let mut matched_frames = 0;
 
@@ -803,7 +994,6 @@ fn verify_candidate_segment(
 
         total_compared += 1;
 
-        // Check peak frequency bin overlap (with +/- 1 bin tolerance for pitch stability)
         let mut overlaps = 0;
         for &p1 in q_frame {
             for &p2 in r_frame {
@@ -822,12 +1012,12 @@ fn verify_candidate_segment(
     }
 
     if total_compared < 10 {
-        return false;
+        return (false, 0.0);
     }
 
     let overall_similarity = matched_frames as f64 / total_compared as f64;
-    // True audio duplicates have >= 50% matching frames across the 10+ second candidate segment
-    overall_similarity >= 0.50
+    let pct = (overall_similarity * 100.0).min(100.0);
+    (overall_similarity >= 0.50, pct)
 }
 
 fn generate_fingerprints_from_raw_peaks(
@@ -874,7 +1064,7 @@ fn generate_fingerprints_from_raw_peaks(
 
 fn extract_raw_peaks(
     mp3_path: &Path,
-) -> Result<(f64, Vec<Vec<u16>>, u32), Box<dyn std::error::Error>> {
+) -> Result<(f64, Vec<Vec<u16>>, Vec<f32>, u32), Box<dyn std::error::Error>> {
     let mut child = Command::new("ffmpeg")
         .arg("-loglevel")
         .arg("error")
@@ -911,23 +1101,21 @@ fn extract_raw_peaks(
     let duration_secs = total_samples as f64 / SAMPLE_RATE as f64;
 
     if total_samples < FFT_SIZE {
-        return Ok((duration_secs, Vec::new(), 0));
+        return Ok((duration_secs, Vec::new(), Vec::new(), 0));
     }
 
-    // Prepare FFT planner
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
 
-    // Hanning Window
     let hanning: Vec<f32> = (0..FFT_SIZE)
         .map(|n| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * n as f32 / (FFT_SIZE - 1) as f32).cos()))
         .collect();
 
-    let num_bins = FFT_SIZE / 2; // 512 bins
+    let num_bins = FFT_SIZE / 2;
     let total_frames = ((total_samples - FFT_SIZE) / HOP_SIZE + 1) as u32;
 
-    // 1. Compute spectrogram magnitudes
     let mut mags: Vec<Vec<f32>> = Vec::with_capacity(total_frames as usize);
+    let mut frame_energies: Vec<f32> = Vec::with_capacity(total_frames as usize);
 
     for frame_idx in 0..total_frames {
         let start_sample = frame_idx as usize * HOP_SIZE;
@@ -938,10 +1126,12 @@ fn extract_raw_peaks(
         fft.process(&mut buffer);
 
         let frame_mags: Vec<f32> = (0..num_bins).map(|b| buffer[b].norm()).collect();
+        let energy: f32 = (frame_mags.iter().map(|v| v * v).sum::<f32>() / num_bins as f32).sqrt();
+
         mags.push(frame_mags);
+        frame_energies.push(energy);
     }
 
-    // 2. Find 2D local maxima peaks (in 5x5 time-frequency window)
     let mut frame_peaks: Vec<Vec<u16>> = vec![Vec::new(); total_frames as usize];
 
     for t in 2..(total_frames as usize - 2) {
@@ -970,13 +1160,12 @@ fn extract_raw_peaks(
             }
         }
 
-        // Keep top MAX_RAW_PEAKS_STORED (8) strongest peaks per frame
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(MAX_RAW_PEAKS_STORED);
         frame_peaks[t] = candidates.into_iter().map(|(b, _)| b).collect();
     }
 
-    Ok((duration_secs, frame_peaks, total_frames))
+    Ok((duration_secs, frame_peaks, frame_energies, total_frames))
 }
 
 fn save_raw_peaks_file(
@@ -991,9 +1180,17 @@ fn save_raw_peaks_file(
     writer.write_all(&data.total_frames.to_le_bytes())?;
     writer.write_all(&(MAX_RAW_PEAKS_STORED as u32).to_le_bytes())?;
 
-    for peaks in &data.frame_peaks {
+    for i in 0..data.frame_peaks.len() {
+        let peaks = &data.frame_peaks[i];
+        let energy = if i < data.frame_energies.len() {
+            data.frame_energies[i]
+        } else {
+            0.0
+        };
+
         let count = peaks.len() as u8;
         writer.write_all(&[count])?;
+        writer.write_all(&energy.to_le_bytes())?;
         for &p in peaks {
             writer.write_all(&p.to_le_bytes())?;
         }
@@ -1022,13 +1219,19 @@ fn load_raw_peaks_file(path: &Path) -> Result<RawAudioPeaksFile, Box<dyn std::er
     let total_frames = u32::from_le_bytes(buf4);
 
     reader.read_exact(&mut buf4)?;
-    let _max_peaks = u32::from_le_bytes(buf4);
 
     let mut frame_peaks = Vec::with_capacity(total_frames as usize);
+    let mut frame_energies = Vec::with_capacity(total_frames as usize);
+
     for _ in 0..total_frames {
         let mut count_buf = [0u8; 1];
         reader.read_exact(&mut count_buf)?;
         let count = count_buf[0] as usize;
+
+        let mut energy_buf = [0u8; 4];
+        reader.read_exact(&mut energy_buf)?;
+        let energy = f32::from_le_bytes(energy_buf);
+
         let mut peaks = Vec::with_capacity(count);
         for _ in 0..count {
             let mut p_buf = [0u8; 2];
@@ -1036,12 +1239,14 @@ fn load_raw_peaks_file(path: &Path) -> Result<RawAudioPeaksFile, Box<dyn std::er
             peaks.push(u16::from_le_bytes(p_buf));
         }
         frame_peaks.push(peaks);
+        frame_energies.push(energy);
     }
 
     Ok(RawAudioPeaksFile {
         duration_secs,
         total_frames,
         frame_peaks,
+        frame_energies,
     })
 }
 
@@ -1086,7 +1291,7 @@ fn invert_intervals(cut_intervals: &[(f64, f64)], total_duration: f64) -> Vec<(f
     keep
 }
 
-fn splice_audio_ffmpeg(
+fn splice_audio_ffmpeg_crossfade(
     input_mp3: &Path,
     keep_intervals: &[(f64, f64)],
     output_mp3: &Path,
@@ -1118,22 +1323,45 @@ fn splice_audio_ffmpeg(
         return Ok(());
     }
 
+    // Build FFmpeg filter complex with equal-power micro cross-fading (30ms = 0.03s)
+    let crossfade_duration = 0.030f64;
     let mut filter_str = String::new();
-    let mut concat_labels = String::new();
 
     for (i, &(start, end)) in keep_intervals.iter().enumerate() {
         filter_str.push_str(&format!(
             "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
             start, end, i
         ));
-        concat_labels.push_str(&format!("[a{}]", i));
     }
 
-    filter_str.push_str(&format!(
-        "{}concat=n={}:v=0:a=1[outa]",
-        concat_labels,
-        keep_intervals.len()
-    ));
+    // Connect segments sequentially via acrossfade
+    if keep_intervals.len() == 2 {
+        filter_str.push_str(&format!(
+            "[a0][a1]acrossfade=d={:.3}:c1=tri:c2=tri[outa]",
+            crossfade_duration
+        ));
+    } else {
+        filter_str.push_str(&format!(
+            "[a0][a1]acrossfade=d={:.3}:c1=tri:c2=tri[cf0];",
+            crossfade_duration
+        ));
+        for i in 2..keep_intervals.len() {
+            let prev = i - 2;
+            let next_out = if i == keep_intervals.len() - 1 {
+                "outa".to_string()
+            } else {
+                format!("cf{}", i - 1)
+            };
+            filter_str.push_str(&format!(
+                "[cf{}][a{}]acrossfade=d={:.3}:c1=tri:c2=tri[{}]{}",
+                prev,
+                i,
+                crossfade_duration,
+                next_out,
+                if i == keep_intervals.len() - 1 { "" } else { ";" }
+            ));
+        }
+    }
 
     let status = Command::new("ffmpeg")
         .arg("-y")
@@ -1151,8 +1379,163 @@ fn splice_audio_ffmpeg(
         .status()?;
 
     if !status.success() {
-        return Err("FFmpeg complex filter splicing failed".into());
+        return Err("FFmpeg micro cross-fade splicing failed".into());
     }
 
+    Ok(())
+}
+
+fn copy_id3_tags_and_art(src_mp3: &Path, dst_mp3: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(src_tag) = Tag::read_from_path(src_mp3) {
+        let mut dst_tag = Tag::new();
+        if let Some(title) = src_tag.title() {
+            dst_tag.set_title(title);
+        }
+        if let Some(artist) = src_tag.artist() {
+            dst_tag.set_artist(artist);
+        }
+        if let Some(album) = src_tag.album() {
+            dst_tag.set_album(album);
+        }
+        if let Some(genre) = src_tag.genre() {
+            dst_tag.set_genre(genre);
+        }
+        if let Some(year) = src_tag.year() {
+            dst_tag.set_year(year);
+        }
+        if let Some(track) = src_tag.track() {
+            dst_tag.set_track(track);
+        }
+        for picture in src_tag.pictures() {
+            dst_tag.add_frame(picture.clone());
+        }
+        let _ = dst_tag.write_to_path(dst_mp3, id3::Version::Id3v24);
+    }
+    Ok(())
+}
+
+fn generate_html_report(
+    target_mp3: &Path,
+    cut_details: &[CutSegmentDetails],
+    merged_cut_intervals: &[(f64, f64)],
+    total_duration: f64,
+    total_cut_sec: f64,
+    output_html_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let filename = target_mp3
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("episode.mp3");
+
+    let saved_pct = (total_cut_sec / total_duration.max(1.0)) * 100.0;
+
+    let mut rows_html = String::new();
+    for (idx, d) in cut_details.iter().enumerate() {
+        rows_html.push_str(&format!(
+            "<tr><td>#{}</td><td>{:02}:{:02} - {:02}:{:02}</td><td>{:.1}s</td><td><span class='badge bg-success'>{:.1}% Match</span></td><td><code>{}</code></td></tr>",
+            idx + 1,
+            (d.start_sec / 60.0) as u32,
+            (d.start_sec % 60.0) as u32,
+            (d.end_sec / 60.0) as u32,
+            (d.end_sec % 60.0) as u32,
+            d.duration_sec,
+            d.match_similarity_pct,
+            d.reference_file
+        ));
+    }
+
+    let mut timeline_blocks = String::new();
+    let mut current_pos = 0.0f64;
+
+    for &(cut_start, cut_end) in merged_cut_intervals {
+        if cut_start > current_pos {
+            let keep_dur = cut_start - current_pos;
+            let width_pct = (keep_dur / total_duration) * 100.0;
+            timeline_blocks.push_str(&format!(
+                "<div class='timeline-segment keep' style='width: {:.2}%;' title='Speech Content: {:.1}s'></div>",
+                width_pct, keep_dur
+            ));
+        }
+        let cut_dur = cut_end - cut_start;
+        let width_pct = (cut_dur / total_duration) * 100.0;
+        timeline_blocks.push_str(&format!(
+            "<div class='timeline-segment cut' style='width: {:.2}%;' title='Cut Sponsor Ad/Intro: {:.1}s'></div>",
+            width_pct, cut_dur
+        ));
+        current_pos = cut_end;
+    }
+
+    if current_pos < total_duration {
+        let keep_dur = total_duration - current_pos;
+        let width_pct = (keep_dur / total_duration) * 100.0;
+        timeline_blocks.push_str(&format!(
+            "<div class='timeline-segment keep' style='width: {:.2}%;' title='Speech Content: {:.1}s'></div>",
+            width_pct, keep_dur
+        ));
+    }
+
+    let html_content = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ad Removal Inspection Report - {}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {{ background-color: #0f172a; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; padding: 40px 20px; }}
+        .card {{ background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; margin-bottom: 24px; color: #f8fafc; }}
+        .timeline-container {{ display: flex; height: 32px; border-radius: 8px; overflow: hidden; background: #334155; border: 1px solid #475569; }}
+        .timeline-segment.keep {{ background-color: #10b981; }}
+        .timeline-segment.cut {{ background-color: #ef4444; }}
+        table {{ color: #f8fafc; }}
+        thead {{ background-color: #334155; }}
+    </style>
+</head>
+<body>
+    <div class="container max-w-4xl">
+        <div class="d-flex align-items-center justify-content-between mb-4">
+            <h2>Podcasts Ad Removal Report</h2>
+            <span class="badge bg-primary fs-6">v0.2.0</span>
+        </div>
+
+        <div class="card p-4">
+            <h4 class="mb-3">Episode: <code>{}</code></h4>
+            <div class="row text-center mb-3">
+                <div class="col-md-3"><h5>Original</h5><p class="fs-4 text-info">{:.1} min</p></div>
+                <div class="col-md-3"><h5>Cleaned</h5><p class="fs-4 text-success">{:.1} min</p></div>
+                <div class="col-md-3"><h5>Time Cut</h5><p class="fs-4 text-warning">{:.1} sec</p></div>
+                <div class="col-md-3"><h5>Saved</h5><p class="fs-4 text-danger">{:.1}%</p></div>
+            </div>
+
+            <h6 class="mb-2">Audio Timeline Visualization:</h6>
+            <div class="timeline-container mb-2">{}</div>
+            <div class="d-flex justify-content-between text-muted small mb-4">
+                <span><span class="badge bg-success me-1">&nbsp;</span> Preserved Audio</span>
+                <span><span class="badge bg-danger me-1">&nbsp;</span> Removed Intro / Sponsor Ad</span>
+            </div>
+
+            <h5 class="mb-3">Verified Removed Segments</h5>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle">
+                    <thead><tr><th>#</th><th>Time Range</th><th>Duration</th><th>Similarity</th><th>Reference Episode</th></tr></thead>
+                    <tbody>{}</tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"#,
+        filename,
+        filename,
+        total_duration / 60.0,
+        (total_duration - total_cut_sec) / 60.0,
+        total_cut_sec,
+        saved_pct,
+        timeline_blocks,
+        rows_html
+    );
+
+    let mut file = File::create(output_html_path)?;
+    file.write_all(html_content.as_bytes())?;
     Ok(())
 }
