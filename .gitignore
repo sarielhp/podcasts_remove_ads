@@ -1,0 +1,5 @@
+/target
+/scratch
+*.fp
+*.mp3
+.DS_Store
