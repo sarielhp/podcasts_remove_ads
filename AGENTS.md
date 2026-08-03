@@ -20,55 +20,70 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 
 ```text
 /
-├── Cargo.toml          # Rust manifest (rustfft, clap, rayon, notify, id3)
+├── Cargo.toml              # Rust manifest (rustfft, clap, rayon, notify, id3)
 ├── src/
-│   └── main.rs         # Entire application logic (~1,100 lines)
-├── README.md           # User documentation & algorithm guide
-├── CHANGELOG.md        # Release version history
-├── AGENTS.md           # AI maintenance guide (this file)
-└── LICENSE             # MIT License
+│   ├── main.rs             # CLI parsing, subcommand dispatch (~200 lines)
+│   ├── audio.rs            # STFT extraction, peak finding (~150 lines)
+│   ├── fingerprint.rs      # Landmark hashing, matching, verification (~250 lines)
+│   ├── cut.rs              # Cut execution, FFmpeg splicing (~120 lines)
+│   ├── dir.rs              # Directory scanning, handle/root/watch modes (~300 lines)
+│   ├── tags.rs             # ID3 tag date parsing, metadata copy (~110 lines)
+│   ├── report.rs           # HTML inspection report generation (~130 lines)
+│   └── fp.rs               # .fp binary file format I/O (~120 lines)
+├── README.md               # User documentation & algorithm guide
+├── CHANGELOG.md            # Release version history
+├── AGENTS.md               # AI maintenance guide (this file)
+└── LICENSE                 # MIT License
 ```
 
 ---
 
-## 3. Architecture & Data Structures
+## 3. Module Descriptions
 
-### Primary Data Structures (`src/main.rs`)
+### `src/main.rs` — Entry point & CLI
+- Defines `Cli` struct (Clap derive) and `Commands` enum
+- Wires subcommand and flag dispatch to the appropriate module function
+- No business logic beyond dispatch
 
-```rust
-// In-memory representation of raw peak frequency indices and RMS frame energies
-struct RawAudioPeaksFile {
-    duration_secs: f64,
-    total_frames: u32,
-    frame_peaks: Vec<Vec<u16>>,   // Frequency bin indices (0..511) per frame
-    frame_energies: Vec<f32>,     // RMS audio frame energy for silence snapping
-}
+### `src/audio.rs` — Audio decoding & spectral analysis
+- `extract_raw_peaks()`: Pipes MP3 through FFmpeg to PCM, applies STFT (1024-pt FFT, Hanning window, 512 hop), finds 2D local maxima in 5×5 neighborhood, keeps top 8 per frame
+- Exports constants `SAMPLE_RATE`, `FFT_SIZE`, `HOP_SIZE`
 
-// Packed 23-bit landmark hash generated on-the-fly in RAM
-struct Fingerprint {
-    hash: u32,                    // (f1 << 14) | (f2 << 5) | (dt & 0x1F)
-    frame: u32,                   // Frame index t1 where anchor peak occurred
-}
+### `src/fingerprint.rs` — Audio fingerprint matching
+- `generate_fingerprints_from_raw_peaks()`: Packs pairs of peak frequencies and time delta into 23-bit hashes
+- `run_cut_analysis()`: Full pipeline — loads ref .fp files, builds IDF-weighted index, matches query fingerprints, clusters by delta offsets, spectral verification, silence snapping, interval merging
+- `verify_candidate_segment_pct()`: Overlap ratio check between query and reference peaks
+- `snap_to_silence()`: Adjusts cut boundaries to nearest RMS energy minimum
+- `merge_intervals()` / `invert_intervals()`: Cut interval merging and keep-interval inversion
 
-// Struct for inspection report generation
-struct CutSegmentDetails {
-    start_sec: f64,
-    end_sec: f64,
-    duration_sec: f64,
-    match_similarity_pct: f64,
-    reference_file: String,
-}
+### `src/cut.rs` — Audio cutting & FFmpeg integration
+- `run_cut()`: Thin wrapper that calls `run_cut_analysis()` and prints table results
+- `splice_audio_ffmpeg_crossfade()`: Builds FFmpeg filter complex with `acrossfade` for 30ms equal-power cross-fading at segment boundaries
 
-// CLI Subcommands definition (Clap derive)
-enum Commands {
-    Preprocess { inputs: Vec<PathBuf>, output: Option<PathBuf> },
-    Cut { input: PathBuf, indexes: Vec<PathBuf>, output: Option<PathBuf>, eval_peaks: usize, min_duration: f64, dry_run: bool },
-    HandleDir { dir: PathBuf, eval_peaks: usize, min_duration: f64, dry_run: bool },
-    RootDir { dir: PathBuf, eval_peaks: usize, min_duration: f64, dry_run: bool },
-    Watch { dir: PathBuf, eval_peaks: usize, min_duration: f64 },
-    Benchmark { dir: PathBuf },
-}
-```
+### `src/dir.rs` — Directory-level batch processing
+- `run_handle_dir()`: Scans directory, preprocesses missing .fp files (parallel), sorts by ID3 date, cuts files sequentially with neighbor-based reference selection
+- `run_root_dir()`: Iterates subdirectories, calls `run_handle_dir` for each
+- `run_watch_mode()`: Filesystem watcher using `notify`, dispatches to `run_handle_dir` on create/modify events
+- `run_preprocess_batch()`: Batch preprocess specified input files
+- `run_preprocess()`: Single-file preprocessing (wrapper around `extract_raw_peaks` + `save_raw_peaks_file`)
+- `run_scan_test()`: Scans directory, reports which MP3s have parseable ID3 dates
+- `find_mp3_files()` / `walk_dir_recursive()`: Recursive MP3 file discovery
+
+### `src/tags.rs` — ID3 tag utilities
+- `parse_id3_date()`: Reads TDRC, TDAT+TYER, or TYER frames to extract (year, month, day)
+- `get_mp3_sort_key()`: Computes a sortable i64 key from ID3 date or file mtime
+- `copy_id3_tags_and_art()`: Copies metadata and cover art from source to cut MP3
+- `format_duration()`: Converts seconds to MM:SS or H:MM:SS
+
+### `src/report.rs` — HTML report generation
+- `generate_html_report()`: Produces a visual Bootstrap-based HTML page with timeline segments, cut details, and summary statistics
+- `CutSegmentDetails` struct defined here
+
+### `src/fp.rs` — Raw peak file format
+- `RawAudioPeaksFile`: In-memory representation (duration, frames, peak bins, energies)
+- `save_raw_peaks_file()`: Binary serialization with `b"AUDIOPEK"` magic header
+- `load_raw_peaks_file()`: Binary deserialization with magic validation
+- `MAGIC_HEADER`, `MAX_RAW_PEAKS_STORED` constants
 
 ---
 
@@ -95,6 +110,7 @@ enum Commands {
 
 ## 5. Guidelines for AI Agents Modifying Code
 
-1. **Maintain Code Single-File Simplicity**: All core logic lives in `src/main.rs`. Keep helpers clean and well-commented.
-2. **Preserve Compatibility with CLI Subcommands**: Ensure `preprocess`, `cut`, `handle_dir`, `root_dir`, `watch`, and `benchmark` retain backward compatibility with aliases.
+1. **File Size Limit**: Each source file should be at most 500 lines. If a module grows beyond this, split it into focused sub-modules.
+2. **Preserve Compatibility with CLI Subcommands**: Ensure `preprocess`, `cut`, `handle_dir`, `root_dir`, `watch`, `benchmark`, and `scan-test` retain backward compatibility with aliases.
 3. **Never Remove Verification Pass or Silence Snapping**: These passes prevent false cuts and speech clipping.
+4. **Module Boundaries**: Keep `audio.rs` focused on signal processing, `fingerprint.rs` on matching logic, `cut.rs` on FFmpeg integration, `dir.rs` on directory workflows, `tags.rs` on ID3 metadata, `fp.rs` on file format, and `report.rs` on HTML generation.
