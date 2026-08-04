@@ -4,6 +4,21 @@ All notable changes to the `podcasts_remove_ads` project are documented in this 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-04
+
+### Added
+* **Configuration System (`~/.config/podcasts_remove_ads/config.json`)**: Persistent config file with `postproc_enabled` and `postproc_program` settings. Auto-created with inline comments on first run.
+* **Post-Processing Hook (`config --postproc on|off`, `config --postproc-set <cmd>`)**: Optional external program execution after each successful cut. Output rendered in a Unicode box with corner characters.
+* **Config Subcommand (`config --show`)**: View and modify configuration at runtime with colored output.
+* **`.work/` Temporary Directory**: Cutting temp files (`*_cutting.mp3`) are now stored in a `.work/` subdirectory next to the source MP3, keeping the directory clean.
+* **Stale Temp File Cleanup**: On startup, scans `.work/` directories and removes `*_cutting.mp3` files older than 10 minutes.
+* **`--html` Flag**: HTML inspection report generation is now opt-in via `--html` flag on `cut`, `handle-dir`, `root-dir`, and `watch` subcommands.
+
+### Changed
+* **Dependencies**: Added `serde`, `serde_json`, `colored` crates.
+* **CLI Restructure**: Config management moved from global flags to dedicated `config` subcommand for better extensibility.
+* **Postproc Output**: Now prints shortening info before calling the post-processor, with formatted box output.
+
 ## [0.2.0] - 2026-08-03
 
 ### Added

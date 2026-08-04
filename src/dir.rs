@@ -1,12 +1,17 @@
-use crate::audio::extract_raw_peaks;
+use crate::config;
 use crate::cut;
-use crate::fp::{self, RawAudioPeaksFile};
-use crate::tags::{get_mp3_sort_key, parse_id3_date};
+use crate::fp::{self, commit_cut_result, cutting_path, precut_path};
+use crate::tags::{format_duration, get_mp3_sort_key, parse_id3_date};
+use colored::Colorize;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 pub fn run_watch_mode(
@@ -16,6 +21,8 @@ pub fn run_watch_mode(
     preproc: bool,
     max_cut: usize,
     verbose: bool,
+    generate_html: bool,
+    cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("===========================================================");
     println!(" Starting Directory Watcher Mode on {:?}", dir);
@@ -31,6 +38,8 @@ pub fn run_watch_mode(
         preproc,
         max_cut,
         verbose,
+        generate_html,
+        cfg,
     );
 
     let (tx, rx) = channel();
@@ -47,10 +56,10 @@ pub fn run_watch_mode(
             Ok(Ok(event)) => match event.kind {
                 EventKind::Create(_) | EventKind::Modify(_) => {
                     for path in event.paths {
-                        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                            if ext.eq_ignore_ascii_case("mp3")
-                                && !path.to_string_lossy().contains("_cut.mp3")
-                            {
+                        if let Some(ext) = path.extension().and_then(|s| s.to_str())
+                            && ext.eq_ignore_ascii_case("mp3")
+                            && !path.to_string_lossy().ends_with(".precut")
+                        {
                                 println!("\n[Watcher Detected New/Modified File] {:?}", path);
                                 std::thread::sleep(Duration::from_millis(1500));
                                 if let Some(parent) = path.parent() {
@@ -62,6 +71,8 @@ pub fn run_watch_mode(
                                         preproc,
                                         max_cut,
                                         verbose,
+                                        generate_html,
+                                        cfg,
                                     );
                                 } else {
                                     let _ = run_handle_dir(
@@ -72,14 +83,15 @@ pub fn run_watch_mode(
                                         preproc,
                                         max_cut,
                                         verbose,
+                                        generate_html,
+                                        cfg,
                                     );
                                 }
                             }
                         }
                     }
-                }
-                _ => {}
-            },
+                    _ => {}
+                },
             Ok(Err(e)) => eprintln!("Watcher error: {:?}", e),
             Err(e) => {
                 eprintln!("Watcher channel error: {:?}", e);
@@ -99,6 +111,8 @@ pub fn run_root_dir(
     preproc: bool,
     max_cut: usize,
     verbose: bool,
+    generate_html: bool,
+    cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut subdirs = Vec::new();
     for entry in fs::read_dir(root_dir)? {
@@ -167,13 +181,15 @@ pub fn run_root_dir(
         } else {
             0
         };
-        let cut_count = cut_dir(
+let cut_count = cut_dir(
             subdir,
             eval_peaks,
             min_duration,
             dry_run,
             remaining,
             verbose,
+            generate_html,
+            cfg,
         )?;
         if cut_count > 0 && verbose {
             println!(
@@ -204,11 +220,13 @@ pub fn run_handle_dir(
     preproc: bool,
     max_cut: usize,
     verbose: bool,
+    generate_html: bool,
+    cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = preprocess_dir(dir, eval_peaks, verbose)?;
 
     if !preproc {
-        cut_dir(dir, eval_peaks, min_duration, dry_run, max_cut, verbose)?;
+        cut_dir(dir, eval_peaks, min_duration, dry_run, max_cut, verbose, generate_html, cfg)?;
     }
 
     Ok(())
@@ -257,22 +275,64 @@ fn preprocess_dir(
     }
 
     println!(
-        "=== Preprocessing {} missing raw-peak index file(s) ===",
-        missing_preprocess.len()
+        "{}",
+        format!(
+            "=== Preprocessing {} missing raw-peak index file(s) ===",
+            missing_preprocess.len()
+        )
+        .yellow()
+        .bold()
     );
-    missing_preprocess
+
+    let total = missing_preprocess.len();
+    let done = Arc::new(AtomicUsize::new(0));
+    let d = done.clone();
+    let progress = thread::spawn(move || {
+        loop {
+            let n = d.load(Ordering::Relaxed);
+            if n >= total {
+                print!("\r                                            ");
+                break;
+            }
+            print!("\r  Preprocessed {}/{} files...", n, total);
+            let _ = std::io::stdout().flush();
+            thread::sleep(Duration::from_millis(200));
+        }
+    });
+
+    let results: Vec<_> = missing_preprocess
         .par_iter()
-        .for_each(|(mp3_path, fp_path)| {
-            if verbose {
-                println!(
-                    "  [Preprocess Thread] Extracting raw peaks for {:?}",
-                    mp3_path
-                );
+        .map(|(mp3_path, fp_path)| {
+            let err_msg = match fp::run_preprocess(mp3_path, fp_path, verbose) {
+                Ok(()) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            done.fetch_add(1, Ordering::Relaxed);
+            (mp3_path, err_msg)
+        })
+        .collect();
+
+    let _ = progress.join();
+
+    let mut ok = 0u32;
+    let mut fail = 0u32;
+    for (mp3_path, err_msg) in &results {
+        match err_msg {
+            None => ok += 1,
+            Some(msg) => {
+                fail += 1;
+                // Strip the path from the message since we print it in context
+                let clean = msg
+                    .replace(&format!("{:?}", mp3_path), "")
+                    .replace(&format!("{:?}", mp3_path.file_name().unwrap_or_default()), "");
+                eprintln!("  {} {}", "ERROR:".red().bold(), clean.trim());
             }
-            if let Err(e) = run_preprocess(mp3_path, fp_path, verbose) {
-                eprintln!("Error preprocessing {:?}: {}", mp3_path, e);
-            }
-        });
+        }
+    }
+    println!(
+        "Preprocessing complete: {} succeeded, {} failed",
+        ok, fail
+    );
 
     Ok(true)
 }
@@ -284,6 +344,8 @@ fn cut_dir(
     dry_run: bool,
     max_cut: usize,
     verbose: bool,
+    generate_html: bool,
+    cfg: &config::Config,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mp3_files = find_mp3_files(dir)?;
 
@@ -306,21 +368,15 @@ fn cut_dir(
     struct CutTask {
         mp3_path: PathBuf,
         ref_fps: Vec<PathBuf>,
-        cut_output_path: PathBuf,
     }
 
     let cut_tasks: Vec<CutTask> = entries
         .iter()
         .enumerate()
         .filter_map(|(idx, (_sort_key, mp3_path, _fp_path))| {
-            let file_stem = mp3_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("cut_output");
-            let parent = mp3_path.parent().unwrap_or_else(|| Path::new(""));
-            let cut_output_path = parent.join(format!("{}_cut.mp3", file_stem));
+            let precut = precut_path(mp3_path);
 
-            if cut_output_path.exists() && !dry_run {
+            if precut.exists() && !dry_run {
                 None
             } else {
                 let start = idx.saturating_sub(5);
@@ -337,7 +393,6 @@ fn cut_dir(
                     Some(CutTask {
                         mp3_path: mp3_path.clone(),
                         ref_fps,
-                        cut_output_path,
                     })
                 }
             }
@@ -346,7 +401,7 @@ fn cut_dir(
 
     if cut_tasks.is_empty() {
         if verbose {
-            println!("[Cut] All cut files (*_cut.mp3) are up to date!");
+            println!("[Cut] All files are up to date!");
         }
         return Ok(0);
     }
@@ -359,30 +414,74 @@ fn cut_dir(
 
     if dry_run {
         println!(
-            "=== Cutting {} file(s) in {:?} (Dry Run) ===",
-            apply_limit, dir
+            "{}",
+            format!(
+                "=== Cutting {} file(s) in {:?} (Dry Run) ===",
+                apply_limit, dir
+            )
+            .yellow()
+            .bold()
         );
     } else {
-        println!("=== Cutting {} file(s) in {:?} ===", apply_limit, dir);
+        println!(
+            "{}",
+            format!("=== Cutting {} file(s) in {:?} ===", apply_limit, dir)
+                .yellow()
+                .bold()
+        );
     }
 
     let mut results: Vec<cut::CutFileResult> = Vec::new();
 
     for task in cut_tasks.iter().take(apply_limit) {
         println!("  {}", task.mp3_path.to_string_lossy());
+
+        if !dry_run && precut_path(&task.mp3_path).exists() {
+            if verbose {
+                println!("  (already processed, skipping)");
+            }
+            continue;
+        }
+
+        let temp_path = if !dry_run {
+            Some(cutting_path(&task.mp3_path))
+        } else {
+            None
+        };
+
+        let output_path = temp_path.as_ref().unwrap_or(&task.mp3_path);
+
         match cut::run_cut(
             &task.mp3_path,
             &task.ref_fps,
-            &task.cut_output_path,
+            output_path,
             eval_peaks,
             min_duration,
             dry_run,
+            generate_html,
         ) {
             Ok(res) => {
-                cut::print_cut_data_line(&res);
+                if !dry_run
+                    && let Some(temp) = &temp_path
+                {
+                    commit_cut_result(&task.mp3_path, temp, res.cut_dur)?;
+                }
+                println!(
+                    "{} -> {} (cut {})",
+                    format_duration(res.original),
+                    format_duration(res.new_dur),
+                    format_duration(res.cut_dur),
+                );
+                println!();
+                if !dry_run && temp_path.is_some() {
+                    cfg.run_postproc(&task.mp3_path);
+                }
                 results.push(res);
             }
             Err(e) => {
+                if let Some(temp) = &temp_path {
+                    let _ = fs::remove_file(temp);
+                }
                 eprintln!("Error cutting {:?}: {}", task.mp3_path, e);
             }
         }
@@ -515,6 +614,45 @@ pub fn run_scan_test(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub fn run_fix_old_naming(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mp3_files = find_mp3_files(dir)?;
+    let mut fixed = 0u32;
+    let mut skipped = 0u32;
+
+    for mp3_path in &mp3_files {
+        let name = mp3_path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+        if name.ends_with(".precut") || name.ends_with("_cut.mp3") {
+            continue;
+        }
+
+        let file_stem = mp3_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let parent = mp3_path.parent().unwrap_or_else(|| Path::new(""));
+        let cut_path = parent.join(format!("{}_cut.mp3", file_stem));
+        let precut = precut_path(mp3_path);
+
+        if precut.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        if !cut_path.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        fs::rename(mp3_path, &precut)?;
+        fs::rename(&cut_path, mp3_path)?;
+        println!(
+            "  {} -> {}.precut + {}_cut.mp3 -> {}",
+            name, name, file_stem, name
+        );
+        fixed += 1;
+    }
+
+    println!("\nFixed: {} file(s), Skipped: {}", fixed, skipped);
+    Ok(())
+}
+
 pub fn find_mp3_files(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
     walk_dir_recursive(dir, &mut results)?;
@@ -533,100 +671,14 @@ pub fn walk_dir_recursive(
         let path = entry.path();
         if path.is_dir() {
             walk_dir_recursive(&path, results)?;
-        } else if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                let name_lower = name.to_lowercase();
-                if name_lower.ends_with(".mp3") && !name_lower.ends_with("_cut.mp3") {
-                    results.push(path);
-                }
+        } else if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        {
+            let name_lower = name.to_lowercase();
+            if name_lower.ends_with(".mp3") {
+                results.push(path);
             }
         }
-    }
-    Ok(())
-}
-
-pub fn run_preprocess_batch(
-    inputs: &[PathBuf],
-    output: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Preprocessing {} file(s) ===", inputs.len());
-
-    let tasks: Vec<(PathBuf, PathBuf)> = inputs
-        .iter()
-        .map(|input| {
-            let out_path = if inputs.len() == 1 {
-                if let Some(out) = output {
-                    if out.is_dir() {
-                        let mut p = out.to_path_buf();
-                        let file_stem = input
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("output");
-                        p.push(format!("{}.fp", file_stem));
-                        p
-                    } else {
-                        out.to_path_buf()
-                    }
-                } else {
-                    let mut p = input.clone();
-                    p.set_extension("fp");
-                    p
-                }
-            } else if let Some(out_dir) = output {
-                let file_stem = input
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("output");
-                out_dir.join(format!("{}.fp", file_stem))
-            } else {
-                let mut p = input.clone();
-                p.set_extension("fp");
-                p
-            };
-            (input.clone(), out_path)
-        })
-        .collect();
-
-    if let Some(out_dir) = output {
-        if inputs.len() > 1 && !out_dir.exists() {
-            fs::create_dir_all(out_dir)?;
-        }
-    }
-
-    tasks.par_iter().for_each(|(input, out_path)| {
-        if let Err(e) = run_preprocess(input, out_path, false) {
-            eprintln!("Error preprocessing {:?}: {}", input, e);
-        }
-    });
-
-    println!("Batch preprocessing complete!");
-    Ok(())
-}
-
-pub fn run_preprocess(
-    mp3_path: &Path,
-    output_fp_path: &Path,
-    verbose: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (duration_secs, raw_peaks, raw_energies, total_frames) = extract_raw_peaks(mp3_path)?;
-
-    fp::save_raw_peaks_file(
-        output_fp_path,
-        &RawAudioPeaksFile {
-            duration_secs,
-            total_frames,
-            frame_peaks: raw_peaks,
-            frame_energies: raw_energies,
-        },
-    )?;
-
-    if verbose {
-        let fp_size = fs::metadata(output_fp_path)?.len() as f64 / (1024.0 * 1024.0);
-        println!(
-            "  [Preprocess] {:?} -> {:.2} MB raw peak index",
-            mp3_path.file_name().unwrap_or_default(),
-            fp_size
-        );
     }
     Ok(())
 }

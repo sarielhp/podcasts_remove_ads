@@ -1,12 +1,24 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::audio::{extract_raw_peaks, HOP_SIZE, SAMPLE_RATE};
 use crate::cut::splice_audio_ffmpeg_crossfade;
-use crate::fp::load_raw_peaks_file;
+use crate::fp::{load_raw_peaks_file, TimeInterval};
 use crate::report::{generate_html_report, CutSegmentDetails};
 use crate::tags::copy_id3_tags_and_art;
+
+const MAX_HASH_OCCURRENCES: usize = 200;
+const MIN_CLUSTER_FRAMES: usize = 5;
+const CLUSTER_GAP_FRAMES: u32 = 30;
+const MERGE_GAP_TOLERANCE: f64 = 1.5;
+const INVERT_GAP_THRESHOLD: f64 = 0.1;
+const MIN_VERIFY_COMPARED: usize = 10;
+const OVERLAP_RATIO_THRESHOLD: f64 = 0.40;
+const VERIFY_SIMILARITY_THRESHOLD: f64 = 0.50;
+const TARGET_WIN_START: usize = 3;
+const TARGET_WIN_END: usize = 18;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Fingerprint {
@@ -14,25 +26,42 @@ pub struct Fingerprint {
     pub frame: u32,
 }
 
-pub fn run_cut_analysis(
-    cut_mp3: &Path,
-    ref_fp_paths: &[PathBuf],
-    output_mp3: &Path,
-    eval_peaks: usize,
-    min_duration: f64,
-    min_density: f64,
-    min_hits: usize,
-    dry_run: bool,
+pub struct CutConfig<'a> {
+    pub cut_mp3: &'a Path,
+    pub ref_fp_paths: &'a [PathBuf],
+    pub output_mp3: &'a Path,
+    pub eval_peaks: usize,
+    pub min_duration: f64,
+    pub min_density: f64,
+    pub min_hits: usize,
+    pub dry_run: bool,
+    pub generate_html: bool,
+}
+
+pub fn process_cut(
+    config: CutConfig,
 ) -> Result<(f64, f64, Vec<CutSegmentDetails>), Box<dyn std::error::Error>> {
-    // 1. Load raw peak files and generate landmark pair fingerprints on-the-fly in memory
+    let CutConfig {
+        cut_mp3,
+        ref_fp_paths,
+        output_mp3,
+        eval_peaks,
+        min_duration,
+        min_density,
+        min_hits,
+        dry_run,
+        generate_html,
+    } = config;
+
+    print!("\rLoading reference files...           ");
+    let _ = io::stdout().flush();
     let mut raw_index: HashMap<u32, Vec<(usize, u32)>> = HashMap::new();
     let mut ref_raw_files = Vec::with_capacity(ref_fp_paths.len());
     let mut ref_file_names = Vec::with_capacity(ref_fp_paths.len());
 
     for (idx, fp_path) in ref_fp_paths.iter().enumerate() {
         let raw_file = load_raw_peaks_file(fp_path)?;
-        let fingerprints =
-            generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks, 3, 18);
+        let fingerprints = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
         for fp in fingerprints {
             raw_index.entry(fp.hash).or_default().push((idx, fp.frame));
         }
@@ -46,27 +75,28 @@ pub fn run_cut_analysis(
         ref_raw_files.push(raw_file);
     }
 
-    // Filter out over-frequent / non-distinct hashes (stop-word filtering)
-    let max_allowed_occurrences = 200;
+    print!("\rFiltering frequent hashes...          ");
+    let _ = io::stdout().flush();
     let num_refs = ref_fp_paths.len() as f64;
     let mut index_map: HashMap<u32, (Vec<(usize, u32)>, f64)> =
         HashMap::with_capacity(raw_index.len());
 
     for (hash, locations) in raw_index {
         let occ = locations.len();
-        if occ <= max_allowed_occurrences {
+        if occ <= MAX_HASH_OCCURRENCES {
             let idf_weight = ((num_refs + 1.0) / (occ as f64 + 1.0)).ln() + 1.0;
             index_map.insert(hash, (locations, idf_weight));
         }
     }
 
-    // 2. Extract raw peaks from query MP3 and generate query fingerprints on-the-fly
+    print!("\rExtracting query audio peaks...       ");
+    let _ = io::stdout().flush();
     let (query_duration, query_raw_peaks, query_energies, _query_frames) =
         extract_raw_peaks(cut_mp3)?;
-    let query_fingerprints =
-        generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks, 3, 18);
+    let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
 
-    // 3. Match fingerprints & group by (ref_file_idx, delta)
+    print!("\rMatching fingerprints...              ");
+    let _ = io::stdout().flush();
     let mut matches: HashMap<(usize, i32), Vec<u32>> = HashMap::new();
 
     for q_fp in &query_fingerprints {
@@ -82,13 +112,49 @@ pub fn run_cut_analysis(
         }
     }
 
-    // 4. Find contiguous matching segments >= min_duration WITH SPECTRAL VERIFICATION & SILENCE SNAPPING
-    let mut raw_cut_intervals: Vec<(f64, f64)> = Vec::new();
+    print!("\rClustering and verifying segments...  ");
+    let _ = io::stdout().flush();
+    let mut raw_cut_intervals: Vec<TimeInterval> = Vec::new();
     let mut cut_details: Vec<CutSegmentDetails> = Vec::new();
     let frame_time = HOP_SIZE as f64 / SAMPLE_RATE as f64;
 
+    let mut maybe_push_cluster = |cluster_start: u32,
+                                  cluster_end: u32,
+                                  cluster_hits: usize,
+                                  ref_idx: usize,
+                                  delta: i32|
+     -> Result<(), Box<dyn std::error::Error>> {
+        let dur = (cluster_end - cluster_start) as f64 * frame_time;
+        let density = cluster_hits as f64 / dur.max(0.1);
+        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
+            && let Some(sim_pct) = verify_candidate_segment_pct(
+                &query_raw_peaks,
+                &ref_raw_files[ref_idx].frame_peaks,
+                cluster_start,
+                cluster_end,
+                delta,
+            )
+        {
+            let snapped_start = snap_to_silence(&query_energies, cluster_start);
+            let snapped_end = snap_to_silence(&query_energies, cluster_end);
+
+            let start_t = snapped_start as f64 * frame_time;
+            let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
+
+            raw_cut_intervals.push(TimeInterval::new(start_t, end_t));
+            cut_details.push(CutSegmentDetails {
+                start_sec: start_t,
+                end_sec: end_t,
+                duration_sec: end_t - start_t,
+                match_similarity_pct: sim_pct,
+                reference_file: ref_file_names[ref_idx].clone(),
+            });
+        }
+        Ok(())
+    };
+
     for ((ref_idx, delta), mut frames) in matches {
-        if frames.len() < 5 {
+        if frames.len() < MIN_CLUSTER_FRAMES {
             continue;
         }
 
@@ -100,76 +166,24 @@ pub fn run_cut_analysis(
         let mut cluster_hits = 1;
 
         for &f in &frames[1..] {
-            if f <= cluster_end + 30 {
+            if f <= cluster_end + CLUSTER_GAP_FRAMES {
                 cluster_end = f;
                 cluster_hits += 1;
             } else {
-                let dur = (cluster_end - cluster_start) as f64 * frame_time;
-                let density = cluster_hits as f64 / dur.max(0.1);
-                if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits) {
-                    let (is_verified, sim_pct) = verify_candidate_segment_pct(
-                        &query_raw_peaks,
-                        &ref_raw_files[ref_idx].frame_peaks,
-                        cluster_start,
-                        cluster_end,
-                        delta,
-                    );
-                    if is_verified {
-                        // SILENCE SNAPPING: Adjust cluster boundaries to nearest silence window
-                        let snapped_start = snap_to_silence(&query_energies, cluster_start, true);
-                        let snapped_end = snap_to_silence(&query_energies, cluster_end, false);
-
-                        let start_t = (snapped_start as f64 * frame_time).max(0.0);
-                        let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
-
-                        raw_cut_intervals.push((start_t, end_t));
-                        cut_details.push(CutSegmentDetails {
-                            start_sec: start_t,
-                            end_sec: end_t,
-                            duration_sec: end_t - start_t,
-                            match_similarity_pct: sim_pct,
-                            reference_file: ref_file_names[ref_idx].clone(),
-                        });
-                    }
-                }
+                maybe_push_cluster(cluster_start, cluster_end, cluster_hits, ref_idx, delta)?;
                 cluster_start = f;
                 cluster_end = f;
                 cluster_hits = 1;
             }
         }
 
-        let dur = (cluster_end - cluster_start) as f64 * frame_time;
-        let density = cluster_hits as f64 / dur.max(0.1);
-        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits) {
-            let (is_verified, sim_pct) = verify_candidate_segment_pct(
-                &query_raw_peaks,
-                &ref_raw_files[ref_idx].frame_peaks,
-                cluster_start,
-                cluster_end,
-                delta,
-            );
-            if is_verified {
-                let snapped_start = snap_to_silence(&query_energies, cluster_start, true);
-                let snapped_end = snap_to_silence(&query_energies, cluster_end, false);
-
-                let start_t = (snapped_start as f64 * frame_time).max(0.0);
-                let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
-
-                raw_cut_intervals.push((start_t, end_t));
-                cut_details.push(CutSegmentDetails {
-                    start_sec: start_t,
-                    end_sec: end_t,
-                    duration_sec: end_t - start_t,
-                    match_similarity_pct: sim_pct,
-                    reference_file: ref_file_names[ref_idx].clone(),
-                });
-            }
-        }
+        maybe_push_cluster(cluster_start, cluster_end, cluster_hits, ref_idx, delta)?;
     }
 
-    // 5. Merge overlapping/adjacent intervals to cut
-    let merged_cut_intervals = merge_intervals(raw_cut_intervals, 1.5);
-    let total_cut_sec: f64 = merged_cut_intervals.iter().map(|(s, e)| e - s).sum();
+    print!("\rMerging cut intervals...              ");
+    let _ = io::stdout().flush();
+    let merged_cut_intervals = merge_intervals(raw_cut_intervals, MERGE_GAP_TOLERANCE);
+    let total_cut_sec: f64 = merged_cut_intervals.iter().map(|i| i.duration()).sum();
 
     if merged_cut_intervals.is_empty() {
         if !dry_run {
@@ -182,31 +196,35 @@ pub fn run_cut_analysis(
         return Ok((total_cut_sec, query_duration, cut_details));
     }
 
-    // 6. Compute keep intervals
     let keep_intervals = invert_intervals(&merged_cut_intervals, query_duration);
 
-    // 7. Perform audio cutting via FFmpeg WITH EQUAL-POWER MICRO CROSS-FADING
+    print!("\r                                      ");
+    let _ = io::stdout().flush();
     splice_audio_ffmpeg_crossfade(cut_mp3, &keep_intervals, output_mp3)?;
 
-    // 8. Transfer ID3 metadata & embedded cover art to output MP3
-    let _ = copy_id3_tags_and_art(cut_mp3, output_mp3);
+    if let Err(e) = copy_id3_tags_and_art(cut_mp3, output_mp3) {
+        eprintln!("Warning: failed to copy ID3 tags: {}", e);
+    }
 
-    // 9. Generate HTML Inspection Report
-    let report_html_path = output_mp3.with_extension("report.html");
-    let _ = generate_html_report(
-        cut_mp3,
-        &cut_details,
-        &merged_cut_intervals,
-        query_duration,
-        total_cut_sec,
-        &report_html_path,
-    );
+    if generate_html {
+        let report_html_path = output_mp3.with_extension("report.html");
+        if let Err(e) = generate_html_report(
+            cut_mp3,
+            &cut_details,
+            &merged_cut_intervals,
+            query_duration,
+            total_cut_sec,
+            &report_html_path,
+        ) {
+            eprintln!("Warning: failed to generate HTML report: {}", e);
+        }
+    }
 
     Ok((total_cut_sec, query_duration, cut_details))
 }
 
-pub fn snap_to_silence(energies: &[f32], target_frame: u32, is_start_boundary: bool) -> u32 {
-    let window_size = 10; // +/- 10 frames (~0.46s search window)
+pub fn snap_to_silence(energies: &[f32], target_frame: u32) -> u32 {
+    let window_size = 10;
     let tf = target_frame as usize;
     if tf >= energies.len() {
         return target_frame;
@@ -225,11 +243,7 @@ pub fn snap_to_silence(energies: &[f32], target_frame: u32, is_start_boundary: b
         }
     }
 
-    if is_start_boundary {
-        min_frame
-    } else {
-        min_frame
-    }
+    min_frame
 }
 
 pub fn verify_candidate_segment_pct(
@@ -238,7 +252,7 @@ pub fn verify_candidate_segment_pct(
     cluster_start_frame: u32,
     cluster_end_frame: u32,
     delta: i32,
-) -> (bool, f64) {
+) -> Option<f64> {
     let mut total_compared = 0;
     let mut matched_frames = 0;
 
@@ -269,25 +283,27 @@ pub fn verify_candidate_segment_pct(
 
         let min_len = q_frame.len().min(r_frame.len()).max(1);
         let overlap_ratio = overlaps as f64 / min_len as f64;
-        if overlap_ratio >= 0.40 {
+        if overlap_ratio >= OVERLAP_RATIO_THRESHOLD {
             matched_frames += 1;
         }
     }
 
-    if total_compared < 10 {
-        return (false, 0.0);
+    if total_compared < MIN_VERIFY_COMPARED {
+        return None;
     }
 
     let overall_similarity = matched_frames as f64 / total_compared as f64;
     let pct = (overall_similarity * 100.0).min(100.0);
-    (overall_similarity >= 0.50, pct)
+    if overall_similarity >= VERIFY_SIMILARITY_THRESHOLD {
+        Some(pct)
+    } else {
+        None
+    }
 }
 
 pub fn generate_fingerprints_from_raw_peaks(
     raw_frame_peaks: &[Vec<u16>],
     eval_peaks: usize,
-    target_win_start: usize,
-    target_win_end: usize,
 ) -> Vec<Fingerprint> {
     let total_frames = raw_frame_peaks.len();
     let mut fingerprints = Vec::new();
@@ -299,8 +315,8 @@ pub fn generate_fingerprints_from_raw_peaks(
             continue;
         }
 
-        let t2_end = (t1 + target_win_end).min(total_frames);
-        for t2 in (t1 + target_win_start)..t2_end {
+        let t2_end = (t1 + TARGET_WIN_END).min(total_frames);
+        for t2 in (t1 + TARGET_WIN_START)..t2_end {
             let peaks2 = &raw_frame_peaks[t2];
             let n2 = peaks2.len().min(eval_peaks);
             if n2 == 0 {
@@ -325,43 +341,124 @@ pub fn generate_fingerprints_from_raw_peaks(
     fingerprints
 }
 
-pub fn merge_intervals(mut intervals: Vec<(f64, f64)>, gap_tolerance: f64) -> Vec<(f64, f64)> {
+pub fn merge_intervals(mut intervals: Vec<TimeInterval>, gap_tolerance: f64) -> Vec<TimeInterval> {
     if intervals.is_empty() {
         return Vec::new();
     }
 
-    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    intervals.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
 
     let mut merged = Vec::new();
-    let (mut curr_start, mut curr_end) = intervals[0];
+    let (mut curr_start, mut curr_end) = (intervals[0].start, intervals[0].end);
 
-    for &(start, end) in &intervals[1..] {
-        if start <= curr_end + gap_tolerance {
-            curr_end = curr_end.max(end);
+    for interval in &intervals[1..] {
+        if interval.start <= curr_end + gap_tolerance {
+            curr_end = curr_end.max(interval.end);
         } else {
-            merged.push((curr_start, curr_end));
-            curr_start = start;
-            curr_end = end;
+            merged.push(TimeInterval::new(curr_start, curr_end));
+            curr_start = interval.start;
+            curr_end = interval.end;
         }
     }
-    merged.push((curr_start, curr_end));
+    merged.push(TimeInterval::new(curr_start, curr_end));
     merged
 }
 
-pub fn invert_intervals(cut_intervals: &[(f64, f64)], total_duration: f64) -> Vec<(f64, f64)> {
+pub fn invert_intervals(cut_intervals: &[TimeInterval], total_duration: f64) -> Vec<TimeInterval> {
     let mut keep = Vec::new();
     let mut current_pos = 0.0f64;
 
-    for &(cut_start, cut_end) in cut_intervals {
-        if cut_start > current_pos + 0.1 {
-            keep.push((current_pos, cut_start));
+    for interval in cut_intervals {
+        if interval.start > current_pos + INVERT_GAP_THRESHOLD {
+            keep.push(TimeInterval::new(current_pos, interval.start));
         }
-        current_pos = current_pos.max(cut_end);
+        current_pos = current_pos.max(interval.end);
     }
 
-    if current_pos + 0.1 < total_duration {
-        keep.push((current_pos, total_duration));
+    if current_pos + INVERT_GAP_THRESHOLD < total_duration {
+        keep.push(TimeInterval::new(current_pos, total_duration));
     }
 
     keep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_intervals_empty() {
+        assert!(merge_intervals(vec![], 1.0).is_empty());
+    }
+
+    #[test]
+    fn test_merge_intervals_no_overlap() {
+        let intervals = vec![
+            TimeInterval::new(0.0, 10.0),
+            TimeInterval::new(20.0, 30.0),
+        ];
+        let merged = merge_intervals(intervals, 1.0);
+        assert_eq!(merged.len(), 2);
+        assert!((merged[0].start - 0.0).abs() < 1e-9);
+        assert!((merged[0].end - 10.0).abs() < 1e-9);
+        assert!((merged[1].start - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_merge_intervals_adjacent() {
+        let intervals = vec![
+            TimeInterval::new(0.0, 10.0),
+            TimeInterval::new(10.5, 20.0),
+        ];
+        let merged = merge_intervals(intervals, 1.0);
+        assert_eq!(merged.len(), 1);
+        assert!((merged[0].start - 0.0).abs() < 1e-9);
+        assert!((merged[0].end - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_merge_intervals_overlap() {
+        let intervals = vec![
+            TimeInterval::new(0.0, 15.0),
+            TimeInterval::new(10.0, 20.0),
+        ];
+        let merged = merge_intervals(intervals, 0.0);
+        assert_eq!(merged.len(), 1);
+        assert!((merged[0].start - 0.0).abs() < 1e-9);
+        assert!((merged[0].end - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_invert_intervals_empty() {
+        let inverted = invert_intervals(&[], 100.0);
+        assert_eq!(inverted.len(), 1);
+        assert!((inverted[0].start - 0.0).abs() < 1e-9);
+        assert!((inverted[0].end - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_invert_intervals_middle() {
+        let cuts = vec![TimeInterval::new(10.0, 20.0)];
+        let inverted = invert_intervals(&cuts, 100.0);
+        assert_eq!(inverted.len(), 2);
+        assert!((inverted[0].end - 10.0).abs() < 1e-9);
+        assert!((inverted[1].start - 20.0).abs() < 1e-9);
+        assert!((inverted[1].end - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_snap_to_silence_basic() {
+        let energies = vec![0.5, 0.8, 0.1, 0.9, 0.3];
+        // Target frame 2 has lowest energy (0.1), so snap should stay at 2
+        let snapped = snap_to_silence(&energies, 2);
+        assert_eq!(snapped, 2);
+    }
+
+    #[test]
+    fn test_snap_to_silence_near_low() {
+        let energies = vec![0.1, 0.8, 0.9, 0.5, 0.3];
+        // Target frame 0 has the lowest energy in the search window, snap stays at 0
+        let snapped = snap_to_silence(&energies, 0);
+        assert_eq!(snapped, 0);
+    }
 }

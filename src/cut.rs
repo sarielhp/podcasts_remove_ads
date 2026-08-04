@@ -1,5 +1,8 @@
-use crate::fingerprint::run_cut_analysis;
+use crate::fingerprint::{process_cut, CutConfig};
+use crate::fp::eval_peaks_params;
+use crate::fp::TimeInterval;
 use crate::tags::format_duration;
+use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 use terminal_size::terminal_size;
 
-const NON_FILE_COLS: usize = 38; // "  " + 3 separators + 3x9 data cols
+const NON_FILE_COLS: usize = 38;
 
 fn filename_col_width() -> usize {
     let term_w = terminal_size().map(|(w, _)| w.0 as usize).unwrap_or(80);
@@ -27,20 +30,20 @@ pub struct CutFileResult {
 
 fn truncate_last(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        format!("{:>width$}", s, width = max_len)
+        format!("{:<width$}", s, width = max_len)
     } else {
-        format!("{}", &s[s.len() - max_len..])
+        s[s.len() - max_len..].to_string()
     }
 }
 
 pub fn print_cut_data_line(res: &CutFileResult) {
     let fw = filename_col_width();
     println!(
-        "  {:fw$} | {:>9} | {:>9} | {:>9}",
-        truncate_last(&res.full_path, fw),
+        "  {:>9} | {:>9} | {:>9} | {:fw$}",
         format_duration(res.original),
         format_duration(res.new_dur),
         format_duration(res.cut_dur),
+        truncate_last(&res.full_path, fw),
         fw = fw,
     );
 }
@@ -48,15 +51,15 @@ pub fn print_cut_data_line(res: &CutFileResult) {
 pub fn print_cut_header() {
     let fw = filename_col_width();
     println!(
-        "  {:fw$} | {:>9} | {:>9} | {:>9}",
-        "File",
+        "  {:>9} | {:>9} | {:>9} | {:fw$}",
         "Original",
         "New",
         "Cut",
+        "File",
         fw = fw,
     );
     println!(
-        "  {:-<fw$}-+-{:-<9}-+-{:-<9}-+-{:-<9}",
+        "  {:-<9}-+-{:-<9}-+-{:-<9}-+-{:-<fw$}",
         "",
         "",
         "",
@@ -104,9 +107,9 @@ fn run_ffmpeg_spinner(
         if !stderr_output.is_empty() {
             eprintln!("\n{}", stderr_output);
         }
-        println!();
     } else {
-        println!("\rffmpeg done                  ");
+        print!("\r                                  ");
+        let _ = io::stdout().flush();
     }
 
     Ok(status)
@@ -119,15 +122,14 @@ pub fn run_cut(
     eval_peaks: usize,
     min_duration: f64,
     dry_run: bool,
+    generate_html: bool,
 ) -> Result<CutFileResult, Box<dyn std::error::Error>> {
-    let (min_density, min_hits) = match eval_peaks {
-        8 => (5.0, 80),
-        4 => (5.0, 80),
-        2 => (2.0, 35),
-        _ => (1.0, 15),
-    };
+    if let Some(parent) = output_mp3.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let (min_density, min_hits) = eval_peaks_params(eval_peaks);
 
-    let (cut_duration, query_duration, details) = run_cut_analysis(
+    let (cut_duration, query_duration, details) = process_cut(CutConfig {
         cut_mp3,
         ref_fp_paths,
         output_mp3,
@@ -136,7 +138,8 @@ pub fn run_cut(
         min_density,
         min_hits,
         dry_run,
-    )?;
+        generate_html,
+    })?;
 
     let new_duration = query_duration - cut_duration;
 
@@ -176,7 +179,7 @@ pub fn run_cut(
 
 pub fn splice_audio_ffmpeg_crossfade(
     input_mp3: &Path,
-    keep_intervals: &[(f64, f64)],
+    keep_intervals: &[TimeInterval],
     output_mp3: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if keep_intervals.is_empty() {
@@ -185,7 +188,8 @@ pub fn splice_audio_ffmpeg_crossfade(
     }
 
     if keep_intervals.len() == 1 {
-        let (s, e) = keep_intervals[0];
+        let s = keep_intervals[0].start;
+        let e = keep_intervals[0].end;
         let mut cmd = Command::new("ffmpeg");
         cmd.arg("-y")
             .arg("-ss")
@@ -206,18 +210,16 @@ pub fn splice_audio_ffmpeg_crossfade(
         return Ok(());
     }
 
-    // Build FFmpeg filter complex with equal-power micro cross-fading (30ms = 0.03s)
     let crossfade_duration = 0.030f64;
     let mut filter_str = String::new();
 
-    for (i, &(start, end)) in keep_intervals.iter().enumerate() {
+    for (i, interval) in keep_intervals.iter().enumerate() {
         filter_str.push_str(&format!(
             "[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{}];",
-            start, end, i
+            interval.start, interval.end, i
         ));
     }
 
-    // Connect segments sequentially via acrossfade
     if keep_intervals.len() == 2 {
         filter_str.push_str(&format!(
             "[a0][a1]acrossfade=d={:.3}:c1=tri:c2=tri[outa]",

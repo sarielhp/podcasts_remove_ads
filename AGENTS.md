@@ -6,7 +6,7 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 
 ## 1. Project Overview & Scope
 
-`podcasts_remove_ads` (v0.2.0) is a Rust CLI tool designed to detect and cut repeated audio segments ($\ge 10.0$ seconds) across podcast MP3 episodes. It operates without machine learning models or external cloud services, relying instead on acoustic STFT spectral peak fingerprinting, silence boundary snapping, micro cross-fading, and a post-clustering verification pass.
+`podcasts_remove_ads` (v0.3.0) is a Rust CLI tool designed to detect and cut repeated audio segments ($\ge 10.0$ seconds) across podcast MP3 episodes. It operates without machine learning models or external cloud services, relying instead on acoustic STFT spectral peak fingerprinting, silence boundary snapping, micro cross-fading, and a post-clustering verification pass.
 
 ### Key Goals & Constraints
 1. **0% False Cut Tolerance**: Never cut unique podcast speech or interview content.
@@ -20,16 +20,17 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 
 ```text
 /
-├── Cargo.toml              # Rust manifest (rustfft, clap, rayon, notify, id3)
+├── Cargo.toml              # Rust manifest (rustfft, clap, rayon, notify, id3, serde)
 ├── src/
 │   ├── main.rs             # CLI parsing, subcommand dispatch (~200 lines)
 │   ├── audio.rs            # STFT extraction, peak finding (~150 lines)
 │   ├── fingerprint.rs      # Landmark hashing, matching, verification (~250 lines)
 │   ├── cut.rs              # Cut execution, FFmpeg splicing (~120 lines)
 │   ├── dir.rs              # Directory scanning, handle/root/watch modes (~300 lines)
+│   ├── config.rs           # Config file (~/.config/podcasts_remove_ads/config.json) I/O (~70 lines)
 │   ├── tags.rs             # ID3 tag date parsing, metadata copy (~110 lines)
 │   ├── report.rs           # HTML inspection report generation (~130 lines)
-│   └── fp.rs               # .fp binary file format I/O (~120 lines)
+│   └── fp.rs               # .fp binary file format I/O, stale temp cleanup (~120 lines)
 ├── README.md               # User documentation & algorithm guide
 ├── CHANGELOG.md            # Release version history
 ├── AGENTS.md               # AI maintenance guide (this file)
@@ -68,6 +69,14 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 - `run_preprocess()`: Single-file preprocessing (wrapper around `extract_raw_peaks` + `save_raw_peaks_file`)
 - `run_scan_test()`: Scans directory, reports which MP3s have parseable ID3 dates
 - `find_mp3_files()` / `walk_dir_recursive()`: Recursive MP3 file discovery
+- All cut workflows accept `&config::Config` and call `cfg.run_postproc()` after each successful cut
+
+### `src/config.rs` — Configuration management
+- `Config` struct with `postproc_enabled` (default false) and `postproc_program` (default "ls")
+- `load()`: Reads `~/.config/podcasts_remove_ads/config.json`, creates default if missing
+- `save()`: Writes config with inline JSON comments explaining each field
+- `run_postproc()`: Spawns the configured program with the cut file path, renders output in a box with Unicode box-drawing characters
+- `show()`: Displays current config with colored output and usage hints
 
 ### `src/tags.rs` — ID3 tag utilities
 - `parse_id3_date()`: Reads TDRC, TDAT+TYER, or TYER frames to extract (year, month, day)
@@ -79,10 +88,13 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 - `generate_html_report()`: Produces a visual Bootstrap-based HTML page with timeline segments, cut details, and summary statistics
 - `CutSegmentDetails` struct defined here
 
-### `src/fp.rs` — Raw peak file format
+### `src/fp.rs` — Raw peak file format & temp file management
 - `RawAudioPeaksFile`: In-memory representation (duration, frames, peak bins, energies)
 - `save_raw_peaks_file()`: Binary serialization with `b"AUDIOPEK"` magic header
 - `load_raw_peaks_file()`: Binary deserialization with magic validation
+- `cutting_path()`: Returns `.work/{stem}_cutting.mp3` path for temporary cut files
+- `commit_cut_result()`: Renames original to `.precut`, moves temp cut result in place, cleans up empty `.work/` dir
+- `cleanup_stale_cutting_files()`: Scans `.work/` directories at startup, removes files older than 10 minutes
 - `MAGIC_HEADER`, `MAX_RAW_PEAKS_STORED` constants
 
 ---

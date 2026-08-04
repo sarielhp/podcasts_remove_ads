@@ -117,3 +117,29 @@ pub fn copy_id3_tags_and_art(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(0.0), "00:00");
+        assert_eq!(format_duration(59.0), "00:59");
+        assert_eq!(format_duration(61.0), "01:01");
+        assert_eq!(format_duration(3599.0), "59:59");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(3600.0), "1:00:00");
+        assert_eq!(format_duration(3661.0), "1:01:01");
+        assert_eq!(format_duration(7384.0), "2:03:04");
+    }
+
+    #[test]
+    fn test_format_duration_rounding() {
+        assert_eq!(format_duration(59.6), "01:00");
+        assert_eq!(format_duration(1.4), "00:01");
+    }
+}

@@ -3,10 +3,31 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::sync::OnceLock;
+use std::thread;
 
 pub const SAMPLE_RATE: u32 = 11025;
 pub const FFT_SIZE: usize = 1024;
 pub const HOP_SIZE: usize = 512;
+pub const PCM_BUFFER_SIZE: usize = 8192;
+pub const FFT_NEIGHBOR_RADIUS: usize = 2;
+pub const BIN_MARGIN_START: usize = 6;
+pub const BIN_MARGIN_END: usize = 10;
+pub const MIN_PEAK_MAGNITUDE: f32 = 0.01;
+pub const PCM_NORMALIZATION: f32 = 32768.0;
+
+fn hanning_window() -> &'static [f32; FFT_SIZE] {
+    static HANNING: OnceLock<[f32; FFT_SIZE]> = OnceLock::new();
+    HANNING.get_or_init(|| {
+        let mut w = [0.0f32; FFT_SIZE];
+        for (n, val) in w.iter_mut().enumerate() {
+            *val =
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * n as f32 / (FFT_SIZE - 1) as f32).cos());
+        }
+        w
+    })
+}
 
 pub fn extract_raw_peaks(
     mp3_path: &Path,
@@ -24,12 +45,21 @@ pub fn extract_raw_peaks(
         .arg("s16le")
         .arg("-")
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()?;
+
+    let stderr = child.stderr.take().ok_or("Failed to open ffmpeg stderr")?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = String::new();
+        let mut handle = stderr;
+        let _ = handle.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
 
     let mut stdout = child.stdout.take().ok_or("Failed to open ffmpeg stdout")?;
     let mut pcm_samples = Vec::new();
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; PCM_BUFFER_SIZE];
 
     while let Ok(n) = stdout.read(&mut buffer) {
         if n == 0 {
@@ -37,27 +67,38 @@ pub fn extract_raw_peaks(
         }
         for chunk in buffer[..n].chunks_exact(2) {
             let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            pcm_samples.push(sample as f32 / 32768.0);
+            pcm_samples.push(sample as f32 / PCM_NORMALIZATION);
         }
     }
 
-    let _status = child.wait()?;
+    let ffmpeg_stderr = rx.recv().unwrap_or_default();
+    let status = child.wait()?;
+
+    if !status.success() {
+        return Err(format!(
+            "ffmpeg failed on {:?}: {}",
+            mp3_path.file_name().unwrap_or_default(),
+            ffmpeg_stderr.trim()
+        )
+        .into());
+    }
 
     let total_samples = pcm_samples.len();
     let duration_secs = total_samples as f64 / SAMPLE_RATE as f64;
 
     if total_samples < FFT_SIZE {
-        return Ok((duration_secs, Vec::new(), Vec::new(), 0));
+        return Err(format!(
+            "audio too short in {:?}: {:.1}s",
+            mp3_path.file_name().unwrap_or_default(),
+            duration_secs
+        )
+        .into());
     }
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
 
-    let hanning: Vec<f32> = (0..FFT_SIZE)
-        .map(|n| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * n as f32 / (FFT_SIZE - 1) as f32).cos())
-        })
-        .collect();
+    let hanning = hanning_window();
 
     let num_bins = FFT_SIZE / 2;
     let total_frames = ((total_samples - FFT_SIZE) / HOP_SIZE + 1) as u32;
@@ -82,17 +123,19 @@ pub fn extract_raw_peaks(
 
     let mut frame_peaks: Vec<Vec<u16>> = vec![Vec::new(); total_frames as usize];
 
-    for t in 2..(total_frames as usize - 2) {
+    for t in 0..total_frames as usize {
         let mut candidates = Vec::new();
-        for bin in 6..(num_bins - 10) {
+        for bin in BIN_MARGIN_START..(num_bins - BIN_MARGIN_END) {
             let val = mags[t][bin];
-            if val < 0.01 {
+            if val < MIN_PEAK_MAGNITUDE {
                 continue;
             }
 
+            let dt_start = t.saturating_sub(FFT_NEIGHBOR_RADIUS);
+            let dt_end = (t + FFT_NEIGHBOR_RADIUS).min(total_frames as usize - 1);
             let mut is_max = true;
-            'outer: for dt in (t - 2)..=(t + 2) {
-                for dbin in (bin - 2)..=(bin + 2) {
+            'outer: for dt in dt_start..=dt_end {
+                for dbin in (bin - FFT_NEIGHBOR_RADIUS)..=(bin + FFT_NEIGHBOR_RADIUS) {
                     if dt == t && dbin == bin {
                         continue;
                     }

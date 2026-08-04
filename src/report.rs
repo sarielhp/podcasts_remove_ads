@@ -1,3 +1,4 @@
+use crate::fp::TimeInterval;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -14,7 +15,7 @@ pub struct CutSegmentDetails {
 pub fn generate_html_report(
     target_mp3: &Path,
     cut_details: &[CutSegmentDetails],
-    merged_cut_intervals: &[(f64, f64)],
+    merged_cut_intervals: &[TimeInterval],
     total_duration: f64,
     total_cut_sec: f64,
     output_html_path: &Path,
@@ -44,22 +45,22 @@ pub fn generate_html_report(
     let mut timeline_blocks = String::new();
     let mut current_pos = 0.0f64;
 
-    for &(cut_start, cut_end) in merged_cut_intervals {
-        if cut_start > current_pos {
-            let keep_dur = cut_start - current_pos;
+    for interval in merged_cut_intervals {
+        if interval.start > current_pos {
+            let keep_dur = interval.start - current_pos;
             let width_pct = (keep_dur / total_duration) * 100.0;
             timeline_blocks.push_str(&format!(
                 "<div class='timeline-segment keep' style='width: {:.2}%;' title='Speech Content: {:.1}s'></div>",
                 width_pct, keep_dur
             ));
         }
-        let cut_dur = cut_end - cut_start;
+        let cut_dur = interval.duration();
         let width_pct = (cut_dur / total_duration) * 100.0;
         timeline_blocks.push_str(&format!(
             "<div class='timeline-segment cut' style='width: {:.2}%;' title='Cut Sponsor Ad/Intro: {:.1}s'></div>",
             width_pct, cut_dur
         ));
-        current_pos = cut_end;
+        current_pos = interval.end;
     }
 
     if current_pos < total_duration {
