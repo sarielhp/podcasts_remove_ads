@@ -18,6 +18,7 @@ pub fn run_watch_mode(
     dir: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    max_occurrences: usize,
     preproc: bool,
     max_cut: usize,
     verbose: bool,
@@ -36,6 +37,7 @@ pub fn run_watch_mode(
         dir,
         eval_peaks,
         min_duration,
+        max_occurrences,
         false,
         preproc,
         max_cut,
@@ -71,6 +73,7 @@ pub fn run_watch_mode(
                                         parent,
                                         eval_peaks,
                                         min_duration,
+                                        max_occurrences,
                                         false,
                                         preproc,
                                         max_cut,
@@ -85,6 +88,7 @@ pub fn run_watch_mode(
                                         dir,
                                         eval_peaks,
                                         min_duration,
+                                        max_occurrences,
                                         false,
                                         preproc,
                                         max_cut,
@@ -115,6 +119,7 @@ pub fn run_root_dir(
     root_dir: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    max_occurrences: usize,
     dry_run: bool,
     preproc: bool,
     max_cut: usize,
@@ -195,6 +200,7 @@ let cut_count = cut_dir(
             subdir,
             eval_peaks,
             min_duration,
+            max_occurrences,
             dry_run,
             remaining,
             verbose,
@@ -228,6 +234,7 @@ pub fn run_handle_dir(
     dir: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    max_occurrences: usize,
     dry_run: bool,
     preproc: bool,
     max_cut: usize,
@@ -240,7 +247,7 @@ pub fn run_handle_dir(
     let _ = preprocess_dir(dir, eval_peaks, verbose)?;
 
     if !preproc {
-        cut_dir(dir, eval_peaks, min_duration, dry_run, max_cut, verbose, generate_html, stream_copy, rerun, cfg)?;
+        cut_dir(dir, eval_peaks, min_duration, max_occurrences, dry_run, max_cut, verbose, generate_html, stream_copy, rerun, cfg)?;
     }
 
     Ok(())
@@ -345,6 +352,7 @@ fn cut_dir(
     dir: &Path,
     eval_peaks: usize,
     min_duration: f64,
+    max_occurrences: usize,
     dry_run: bool,
     max_cut: usize,
     verbose: bool,
@@ -463,6 +471,7 @@ fn cut_dir(
             output_path,
             eval_peaks,
             min_duration,
+            max_occurrences,
             dry_run,
             generate_html,
             stream_copy,

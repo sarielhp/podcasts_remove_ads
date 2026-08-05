@@ -28,6 +28,7 @@ pub struct CutConfig<'a> {
     pub min_duration: f64,
     pub min_density: f64,
     pub min_hits: usize,
+    pub max_occurrences: usize,
     pub dry_run: bool,
     pub generate_html: bool,
     pub stream_copy: bool,
@@ -49,6 +50,7 @@ pub fn process_cut(
         min_duration,
         min_density,
         min_hits,
+        max_occurrences,
         dry_run,
         generate_html,
         stream_copy,
@@ -140,6 +142,7 @@ pub fn process_cut(
     radix_config.min_segment_duration = min_duration;
     radix_config.min_cluster_density = min_density;
     radix_config.min_cluster_hits = min_hits;
+    radix_config.max_occurrences = max_occurrences;
     let mut raw_cut_intervals: Vec<TimeInterval> = Vec::new();
     let mut cut_details: Vec<CutSegmentDetails> = Vec::new();
 

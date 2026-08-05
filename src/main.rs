@@ -32,6 +32,10 @@ struct CommonCutArgs {
     #[arg(long, default_value_t = 10.0)]
     min_duration: f64,
 
+    /// Maximum occurrences of a hash across reference files before filtering [default: 4]
+    #[arg(long, default_value_t = 4)]
+    max_occurrences: usize,
+
     /// Analyze and report cuts without modifying any files
     #[arg(long)]
     dry_run: bool,
@@ -247,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &out_path,
                 cut_args.eval_peaks,
                 cut_args.min_duration,
+                cut_args.max_occurrences,
                 cut_args.dry_run,
                 cut_args.html,
                 !cut_args.crossfade,
@@ -272,7 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
         } => {
-            dir::run_handle_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
+            dir::run_handle_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.max_occurrences, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::RootDir {
             dir,
@@ -281,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
         } => {
-            dir::run_root_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
+            dir::run_root_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.max_occurrences, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::Watch {
             dir,
@@ -290,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
         } => {
-            dir::run_watch_mode(&dir, cut_args.eval_peaks, cut_args.min_duration, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
+            dir::run_watch_mode(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.max_occurrences, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::Benchmark { dir } => {
             benchmark::run_benchmark_all(&dir)?;

@@ -123,6 +123,7 @@ pub fn run_benchmark_all(source_dir: &PathBuf) -> Result<(), Box<dyn std::error:
                 min_duration: 10.0,
                 min_density,
                 min_hits,
+                max_occurrences: 4,
                 dry_run: false,
                 generate_html: false,
                 stream_copy: false,
