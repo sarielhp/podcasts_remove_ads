@@ -160,7 +160,7 @@ pub fn run_cut(
             cut_duration,
             cut_duration / 60.0
         );
-        println!("  Cut Segments Identified: {}", details.len());
+        println!("Cut Segments Identified: {}", details.len());
         for (idx, d) in details.iter().enumerate() {
             println!(
                 "    Segment #{}: [{:02}:{:02} - {:02}:{:02}] ({:.1}s) - {:.1}% Match vs {}",

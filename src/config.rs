@@ -116,7 +116,7 @@ impl Config {
         println!();
         println!("{}", "Configuration".yellow().bold().underline());
         println!();
-        println!("  {}  {}", "Post-processor:".cyan().bold(), enabled);
+        println!("{}  {}", "Post-processor:".cyan().bold(), enabled);
         println!(
             "  {}  {}",
             "Program:".cyan().bold(),

@@ -9,9 +9,9 @@ use rayon::prelude::*;
 
 pub fn run_benchmark_all(source_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     println!("=======================================================================");
-    println!(" Benchmark Suite: New Raw-Peaks Format vs Old Pre-Computed Pairs");
-    println!(" (With Spectral Cosine/Overlap Verification Enabled)");
-    println!(" Source Directory: {:?}", source_dir);
+    println!("Benchmark Suite: New Raw-Peaks Format vs Old Pre-Computed Pairs");
+    println!("(With Spectral Cosine/Overlap Verification Enabled)");
+    println!("Source Directory: {:?}", source_dir);
     println!("=======================================================================\n");
 
     let mp3_files = dir::find_mp3_files(source_dir)?;
@@ -144,7 +144,7 @@ pub fn run_benchmark_all(source_dir: &PathBuf) -> Result<(), Box<dyn std::error:
     let _ = fs::remove_dir_all(&temp_dir);
 
     println!("\n\n==========================================================================================================");
-    println!(" BENCHMARK TABLE — Verified Raw-Peak Method Across Peak Configurations");
+    println!("BENCHMARK TABLE — Verified Raw-Peak Method Across Peak Configurations");
     println!("==========================================================================================================");
     println!(
         "{:<38} | {:<16} | {:<16} | {:<16} | {:<12}",

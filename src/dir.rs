@@ -27,8 +27,8 @@ pub fn run_watch_mode(
     cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("===========================================================");
-    println!(" Starting Directory Watcher Mode on {:?}", dir);
-    println!(" Press Ctrl+C to stop watcher.");
+    println!("Starting Directory Watcher Mode on {:?}", dir);
+    println!("Press Ctrl+C to stop watcher.");
     println!("===========================================================\n");
 
     println!("Performing initial scan on existing files...");
@@ -159,7 +159,7 @@ pub fn run_root_dir(
         let did_work = preprocess_dir(subdir, eval_peaks, verbose)?;
         if did_work && verbose {
             println!(
-                " [{}/{}] Preprocessed Subdirectory: {:?}",
+                "[{}/{}] Preprocessed Subdirectory: {:?}",
                 idx + 1,
                 subdirs.len(),
                 subdir
@@ -205,7 +205,7 @@ let cut_count = cut_dir(
         )?;
         if cut_count > 0 && verbose {
             println!(
-                " [{}/{}] Cut Subdirectory: {:?}",
+                "[{}/{}] Cut Subdirectory: {:?}",
                 idx + 1,
                 subdirs.len(),
                 subdir
@@ -329,7 +329,7 @@ fn preprocess_dir(
                 let clean = msg
                     .replace(&format!("{:?}", mp3_path), "")
                     .replace(&format!("{:?}", mp3_path.file_name().unwrap_or_default()), "");
-                eprintln!("  {} {}", "ERROR:".red().bold(), clean.trim());
+                eprintln!("{} {}", "ERROR:".red().bold(), clean.trim());
             }
         }
     }
@@ -440,11 +440,11 @@ fn cut_dir(
     let mut results: Vec<cut::CutFileResult> = Vec::new();
 
     for task in cut_tasks.iter().take(apply_limit) {
-        println!("  {}", task.mp3_path.to_string_lossy());
+        println!("{}", task.mp3_path.to_string_lossy());
 
         if !dry_run && precut_path(&task.mp3_path).exists() {
             if verbose {
-                println!("  (already processed, skipping)");
+                println!("(already processed, skipping)");
             }
             continue;
         }
@@ -525,8 +525,8 @@ pub fn run_scan_test(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             fail_count += 1;
             println!("========================================================================");
-            println!(" FILE: {}", name);
-            println!(" PATH: {:?}", mp3_path);
+            println!("FILE: {}", name);
+            println!("PATH: {:?}", mp3_path);
             println!("------------------------------------------------------------------------");
             if let Ok(tag) = id3::Tag::read_from_path(mp3_path) {
                 for frame in tag.frames() {
@@ -606,10 +606,10 @@ pub fn run_scan_test(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => format!("{:?}", frame.content()),
                     };
-                    println!("  {:4}: {}", frame.id(), content_str);
+                    println!("{:4}: {}", frame.id(), content_str);
                 }
             } else {
-                println!("  (unable to read ID3 tag)");
+                println!("(unable to read ID3 tag)");
             }
             println!("========================================================================");
         }

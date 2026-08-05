@@ -194,7 +194,7 @@ pub fn process_cut(
 
     if dry_run {
         println!("\n==========================================================================");
-        println!(" PIPELINE STAGE TIMING BREAKDOWN (Dry Run)");
+        println!("PIPELINE STAGE TIMING BREAKDOWN (Dry Run)");
         println!("==========================================================================");
         println!("{:<40} | {:<16}", "Pipeline Stage", "Execution Time");
         println!("--------------------------------------------------------------------------");
@@ -280,7 +280,7 @@ pub fn process_cut(
     let dur_stage_6 = t_tags_start.elapsed();
 
     println!("\n==========================================================================");
-    println!(" PIPELINE STAGE TIMING BREAKDOWN");
+    println!("PIPELINE STAGE TIMING BREAKDOWN");
     println!("==========================================================================");
     println!("{:<40} | {:<16}", "Pipeline Stage", "Execution Time");
     println!("--------------------------------------------------------------------------");

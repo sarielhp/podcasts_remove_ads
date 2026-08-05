@@ -91,9 +91,9 @@ pub fn match_fingerprints_radix_map_optimized(
     query_duration: f64,
     config: &RadixMapConfig,
 ) -> Vec<crate::fp::TimeInterval> {
-    use std::collections::HashMap;
     use crate::fingerprint::{snap_to_silence, verify_candidate_segment_pct};
     use crate::fp::TimeInterval;
+    use std::collections::HashMap;
 
     let frame_time = crate::audio::HOP_SIZE as f64 / crate::audio::SAMPLE_RATE as f64;
 
@@ -107,13 +107,18 @@ pub fn match_fingerprints_radix_map_optimized(
 
     let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
     for m in matches_warm {
-        radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+        radix_matches_group
+            .entry(m.delta_q)
+            .or_default()
+            .push(m.q_frame);
     }
 
     let mut candidate_intervals = Vec::new();
 
     for (delta, mut frames) in radix_matches_group {
-        if frames.len() < 3 { continue; }
+        if frames.len() < 3 {
+            continue;
+        }
         frames.sort_unstable();
         frames.dedup();
 
@@ -129,11 +134,21 @@ pub fn match_fingerprints_radix_map_optimized(
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
                 if dur >= config.min_segment_duration
-                    && (density >= config.min_cluster_density || cluster_hits >= config.min_cluster_hits)
-                    && verify_candidate_segment_pct(query_raw_peaks, ref_raw_peaks, cluster_start, cluster_end, delta).is_some()
+                    && (density >= config.min_cluster_density
+                        || cluster_hits >= config.min_cluster_hits)
+                    && verify_candidate_segment_pct(
+                        query_raw_peaks,
+                        ref_raw_peaks,
+                        cluster_start,
+                        cluster_end,
+                        delta,
+                    )
+                    .is_some()
                 {
                     let s = snap_to_silence(query_energies, cluster_start) as f64 * frame_time;
-                    let e = ((snap_to_silence(query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                    let e = ((snap_to_silence(query_energies, cluster_end) as f64 + 1.0)
+                        * frame_time)
+                        .min(query_duration);
                     candidate_intervals.push(TimeInterval::new(s, e));
                 }
                 cluster_start = f;
@@ -145,10 +160,18 @@ pub fn match_fingerprints_radix_map_optimized(
         let density = cluster_hits as f64 / dur.max(0.1);
         if dur >= config.min_segment_duration
             && (density >= config.min_cluster_density || cluster_hits >= config.min_cluster_hits)
-            && verify_candidate_segment_pct(query_raw_peaks, ref_raw_peaks, cluster_start, cluster_end, delta).is_some()
+            && verify_candidate_segment_pct(
+                query_raw_peaks,
+                ref_raw_peaks,
+                cluster_start,
+                cluster_end,
+                delta,
+            )
+            .is_some()
         {
             let s = snap_to_silence(query_energies, cluster_start) as f64 * frame_time;
-            let e = ((snap_to_silence(query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+            let e = ((snap_to_silence(query_energies, cluster_end) as f64 + 1.0) * frame_time)
+                .min(query_duration);
             candidate_intervals.push(TimeInterval::new(s, e));
         }
     }
@@ -691,9 +714,15 @@ mod tests {
 
         // Compare
         if best_delta != 0 {
-            assert!(in_radix, "Best matching delta from HashMap must be present in radix map");
+            assert!(
+                in_radix,
+                "Best matching delta from HashMap must be present in radix map"
+            );
             let hash_cnt = hash_matches.get(&best_delta).map(|v| v.len()).unwrap_or(0);
-            assert_eq!(radix_count, hash_cnt, "Match count for best_delta must match HashMap exactly");
+            assert_eq!(
+                radix_count, hash_cnt,
+                "Match count for best_delta must match HashMap exactly"
+            );
         }
 
         let omitted_entries = hash_total_entries.saturating_sub(radix_matches.len() as u64);
@@ -761,7 +790,7 @@ mod tests {
         }
 
         eprintln!("\n=========================================================================================");
-        eprintln!("   AGGRESSIVE SLIDING-WINDOW WARM FILTER BENCHMARK (55,000 TOTAL CANDIDATE PAIRS)        ");
+        eprintln!("AGGRESSIVE SLIDING-WINDOW WARM FILTER BENCHMARK (55,000 TOTAL CANDIDATE PAIRS)");
         eprintln!("=========================================================================================");
 
         let window_sizes = [21, 43, 65, 85]; // ~2.0s, ~4.0s, ~6.0s, ~8.0s
@@ -813,7 +842,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping gladiator benchmark", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping gladiator benchmark",
+                target_mp3
+            );
             return;
         }
 
@@ -852,7 +884,8 @@ mod tests {
         let hash_start = Instant::now();
         let mut raw_index: HashMap<u32, Vec<(usize, u32)>> = HashMap::new();
         for (idx, raw_file) in ref_raw_files.iter().enumerate() {
-            let fingerprints = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
+            let fingerprints =
+                generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             for fp in fingerprints {
                 raw_index.entry(fp.hash).or_default().push((idx, fp.frame));
             }
@@ -874,14 +907,19 @@ mod tests {
                 for &(ref_idx, r_frame) in ref_matches {
                     let delta = r_frame as i32 - q_fp.frame as i32;
                     let delta_q = (delta + 1) / 2 * 2;
-                    hash_matches.entry((ref_idx, delta_q)).or_default().push(q_fp.frame);
+                    hash_matches
+                        .entry((ref_idx, delta_q))
+                        .or_default()
+                        .push(q_fp.frame);
                 }
             }
         }
 
         let mut hash_intervals: Vec<TimeInterval> = Vec::new();
         for ((ref_idx, delta), mut frames) in hash_matches {
-            if frames.len() < 5 { continue; }
+            if frames.len() < 5 {
+                continue;
+            }
             frames.sort_unstable();
             frames.dedup();
 
@@ -896,11 +934,21 @@ mod tests {
                 } else {
                     let dur = (cluster_end - cluster_start) as f64 * frame_time;
                     let density = cluster_hits as f64 / dur.max(0.1);
-                    if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                        && verify_candidate_segment_pct(&query_raw_peaks, &ref_raw_files[ref_idx].frame_peaks, cluster_start, cluster_end, delta).is_some()
+                    if dur >= min_duration
+                        && (density >= min_density || cluster_hits >= min_hits)
+                        && verify_candidate_segment_pct(
+                            &query_raw_peaks,
+                            &ref_raw_files[ref_idx].frame_peaks,
+                            cluster_start,
+                            cluster_end,
+                            delta,
+                        )
+                        .is_some()
                     {
                         let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                            * frame_time)
+                            .min(query_duration);
                         hash_intervals.push(TimeInterval::new(s, e));
                     }
                     cluster_start = f;
@@ -910,11 +958,20 @@ mod tests {
             }
             let dur = (cluster_end - cluster_start) as f64 * frame_time;
             let density = cluster_hits as f64 / dur.max(0.1);
-            if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                && verify_candidate_segment_pct(&query_raw_peaks, &ref_raw_files[ref_idx].frame_peaks, cluster_start, cluster_end, delta).is_some()
+            if dur >= min_duration
+                && (density >= min_density || cluster_hits >= min_hits)
+                && verify_candidate_segment_pct(
+                    &query_raw_peaks,
+                    &ref_raw_files[ref_idx].frame_peaks,
+                    cluster_start,
+                    cluster_end,
+                    delta,
+                )
+                .is_some()
             {
                 let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time)
+                    .min(query_duration);
                 hash_intervals.push(TimeInterval::new(s, e));
             }
         }
@@ -929,7 +986,10 @@ mod tests {
 
         let query_landmarks: Vec<QueryLandmark> = query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let mut radix_intervals: Vec<TimeInterval> = Vec::new();
@@ -938,7 +998,11 @@ mod tests {
             let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             let ref_landmarks: Vec<RefLandmark> = ref_fps
                 .iter()
-                .map(|fp| RefLandmark { hash: fp.hash, ref_idx: idx as u16, r_frame: fp.frame })
+                .map(|fp| RefLandmark {
+                    hash: fp.hash,
+                    ref_idx: idx as u16,
+                    r_frame: fp.frame,
+                })
                 .collect();
 
             let (matches_warm, _, _, _) = match_fingerprints_radix_map_warm_sliding_window(
@@ -951,11 +1015,16 @@ mod tests {
 
             let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
             for m in matches_warm {
-                radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                radix_matches_group
+                    .entry(m.delta_q)
+                    .or_default()
+                    .push(m.q_frame);
             }
 
             for (delta, mut frames) in radix_matches_group {
-                if frames.len() < 5 { continue; }
+                if frames.len() < 5 {
+                    continue;
+                }
                 frames.sort_unstable();
                 frames.dedup();
 
@@ -970,11 +1039,22 @@ mod tests {
                     } else {
                         let dur = (cluster_end - cluster_start) as f64 * frame_time;
                         let density = cluster_hits as f64 / dur.max(0.1);
-                        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                            && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                        if dur >= min_duration
+                            && (density >= min_density || cluster_hits >= min_hits)
+                            && verify_candidate_segment_pct(
+                                &query_raw_peaks,
+                                &raw_file.frame_peaks,
+                                cluster_start,
+                                cluster_end,
+                                delta,
+                            )
+                            .is_some()
                         {
-                            let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                            let s =
+                                snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
+                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                                * frame_time)
+                                .min(query_duration);
                             radix_intervals.push(TimeInterval::new(s, e));
                         }
                         cluster_start = f;
@@ -984,11 +1064,21 @@ mod tests {
                 }
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
-                if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                    && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                if dur >= min_duration
+                    && (density >= min_density || cluster_hits >= min_hits)
+                    && verify_candidate_segment_pct(
+                        &query_raw_peaks,
+                        &raw_file.frame_peaks,
+                        cluster_start,
+                        cluster_end,
+                        delta,
+                    )
+                    .is_some()
                 {
                     let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                        * frame_time)
+                        .min(query_duration);
                     radix_intervals.push(TimeInterval::new(s, e));
                 }
             }
@@ -999,15 +1089,34 @@ mod tests {
         let radix_time = radix_start.elapsed();
 
         eprintln!("\n=========================================================================================");
-        eprintln!("   FULL CUTTING BENCHMARK: 'A Day in the Life of a Gladiator' (vs 10 Ref Episodes)        ");
+        eprintln!(
+            "FULL CUTTING BENCHMARK: 'A Day in the Life of a Gladiator' (vs 10 Ref Episodes)"
+        );
         eprintln!("=========================================================================================");
-        eprintln!("Target Duration:    {:.2} sec ({:.2} min)", query_duration, query_duration / 60.0);
+        eprintln!(
+            "Target Duration:    {:.2} sec ({:.2} min)",
+            query_duration,
+            query_duration / 60.0
+        );
         eprintln!("-----------------------------------------------------------------------------------------");
-        eprintln!("HashMap Approach  | Total Time: {:6.3}s | Resulting Cut Duration: {:.2}s ({:.2}m)", hash_time.as_secs_f64(), hash_cut_dur, hash_cut_dur / 60.0);
-        eprintln!("RadixMap Approach | Total Time: {:6.3}s | Resulting Cut Duration: {:.2}s ({:.2}m)", radix_time.as_secs_f64(), radix_cut_dur, radix_cut_dur / 60.0);
+        eprintln!(
+            "HashMap Approach  | Total Time: {:6.3}s | Resulting Cut Duration: {:.2}s ({:.2}m)",
+            hash_time.as_secs_f64(),
+            hash_cut_dur,
+            hash_cut_dur / 60.0
+        );
+        eprintln!(
+            "RadixMap Approach | Total Time: {:6.3}s | Resulting Cut Duration: {:.2}s ({:.2}m)",
+            radix_time.as_secs_f64(),
+            radix_cut_dur,
+            radix_cut_dur / 60.0
+        );
         eprintln!("=========================================================================================\n");
 
-        assert!((hash_cut_dur - radix_cut_dur).abs() < 0.1, "Cut duration must match between HashMap and RadixMap");
+        assert!(
+            (hash_cut_dur - radix_cut_dur).abs() < 0.1,
+            "Cut duration must match between HashMap and RadixMap"
+        );
     }
 
     #[test]
@@ -1024,7 +1133,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping table test", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping table test",
+                target_mp3
+            );
             return;
         }
 
@@ -1052,19 +1164,30 @@ mod tests {
         let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
         let query_landmarks: Vec<QueryLandmark> = query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let mut per_file_intervals: Vec<(String, Vec<TimeInterval>)> = Vec::new();
 
         for path in &ref_fp_paths {
             let raw_file = load_raw_peaks_file(path).expect("load ref .fp");
-            let file_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let file_name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             let ref_landmarks: Vec<RefLandmark> = ref_fps
                 .iter()
-                .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                .map(|fp| RefLandmark {
+                    hash: fp.hash,
+                    ref_idx: 0,
+                    r_frame: fp.frame,
+                })
                 .collect();
 
             let (matches_warm, _, _, _) = match_fingerprints_radix_map_warm_sliding_window(
@@ -1077,13 +1200,18 @@ mod tests {
 
             let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
             for m in matches_warm {
-                radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                radix_matches_group
+                    .entry(m.delta_q)
+                    .or_default()
+                    .push(m.q_frame);
             }
 
             let mut single_file_intervals: Vec<TimeInterval> = Vec::new();
 
             for (delta, mut frames) in radix_matches_group {
-                if frames.len() < 5 { continue; }
+                if frames.len() < 5 {
+                    continue;
+                }
                 frames.sort_unstable();
                 frames.dedup();
 
@@ -1098,11 +1226,22 @@ mod tests {
                     } else {
                         let dur = (cluster_end - cluster_start) as f64 * frame_time;
                         let density = cluster_hits as f64 / dur.max(0.1);
-                        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                            && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                        if dur >= min_duration
+                            && (density >= min_density || cluster_hits >= min_hits)
+                            && verify_candidate_segment_pct(
+                                &query_raw_peaks,
+                                &raw_file.frame_peaks,
+                                cluster_start,
+                                cluster_end,
+                                delta,
+                            )
+                            .is_some()
                         {
-                            let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                            let s =
+                                snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
+                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                                * frame_time)
+                                .min(query_duration);
                             single_file_intervals.push(TimeInterval::new(s, e));
                         }
                         cluster_start = f;
@@ -1112,11 +1251,21 @@ mod tests {
                 }
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
-                if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                    && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                if dur >= min_duration
+                    && (density >= min_density || cluster_hits >= min_hits)
+                    && verify_candidate_segment_pct(
+                        &query_raw_peaks,
+                        &raw_file.frame_peaks,
+                        cluster_start,
+                        cluster_end,
+                        delta,
+                    )
+                    .is_some()
                 {
                     let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                        * frame_time)
+                        .min(query_duration);
                     single_file_intervals.push(TimeInterval::new(s, e));
                 }
             }
@@ -1124,9 +1273,16 @@ mod tests {
         }
 
         eprintln!("\n==========================================================================================================");
-        eprintln!(" DIMINISHING RETURNS BENCHMARK: 'A Day in the Life of a Gladiator' (Target: {:.1}s / {:.2}m)", query_duration, query_duration / 60.0);
+        eprintln!("DIMINISHING RETURNS BENCHMARK: 'A Day in the Life of a Gladiator' (Target: {:.1}s / {:.2}m)", query_duration, query_duration / 60.0);
         eprintln!("==========================================================================================================");
-        eprintln!("{:<3} | {:<50} | {:<16} | {:<22} | {:<14}", "#", "Example Reference Episode", "Single File Cut", "Cumulative Merged Cut", "Marginal Gain");
+        eprintln!(
+            "{:<3} | {:<50} | {:<16} | {:<22} | {:<14}",
+            "#",
+            "Example Reference Episode",
+            "Single File Cut",
+            "Cumulative Merged Cut",
+            "Marginal Gain"
+        );
         eprintln!("----------------------------------------------------------------------------------------------------------");
 
         let mut accumulated_intervals: Vec<TimeInterval> = Vec::new();
@@ -1143,7 +1299,11 @@ mod tests {
             let marginal_sec = cumulative_sec - prev_cumulative_sec;
             prev_cumulative_sec = cumulative_sec;
 
-            let truncated_name = if file_name.len() > 48 { format!("{}...", &file_name[..45]) } else { file_name.clone() };
+            let truncated_name = if file_name.len() > 48 {
+                format!("{}...", &file_name[..45])
+            } else {
+                file_name.clone()
+            };
 
             eprintln!(
                 "{:<3} | {:<50} | {:<16} | {:<22} | {:<14}",
@@ -1172,7 +1332,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping radix_map_2 test", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping radix_map_2 test",
+                target_mp3
+            );
             return;
         }
 
@@ -1197,10 +1360,14 @@ mod tests {
 
         let (query_duration, query_raw_peaks, query_energies, _query_frames) =
             crate::audio::extract_raw_peaks(&target_mp3).expect("extract query peaks");
-        let initial_query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
+        let initial_query_fingerprints =
+            generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
         let initial_query_landmarks: Vec<QueryLandmark> = initial_query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let ref_raw_files: Vec<_> = ref_fp_paths
@@ -1218,7 +1385,11 @@ mod tests {
             let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             let ref_landmarks: Vec<RefLandmark> = ref_fps
                 .iter()
-                .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                .map(|fp| RefLandmark {
+                    hash: fp.hash,
+                    ref_idx: 0,
+                    r_frame: fp.frame,
+                })
                 .collect();
 
             let (matches_warm, _, _, _) = match_fingerprints_radix_map_warm_sliding_window(
@@ -1231,11 +1402,16 @@ mod tests {
 
             let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
             for m in matches_warm {
-                radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                radix_matches_group
+                    .entry(m.delta_q)
+                    .or_default()
+                    .push(m.q_frame);
             }
 
             for (delta, mut frames) in radix_matches_group {
-                if frames.len() < 5 { continue; }
+                if frames.len() < 5 {
+                    continue;
+                }
                 frames.sort_unstable();
                 frames.dedup();
 
@@ -1250,11 +1426,22 @@ mod tests {
                     } else {
                         let dur = (cluster_end - cluster_start) as f64 * frame_time;
                         let density = cluster_hits as f64 / dur.max(0.1);
-                        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                            && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                        if dur >= min_duration
+                            && (density >= min_density || cluster_hits >= min_hits)
+                            && verify_candidate_segment_pct(
+                                &query_raw_peaks,
+                                &raw_file.frame_peaks,
+                                cluster_start,
+                                cluster_end,
+                                delta,
+                            )
+                            .is_some()
                         {
-                            let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                            let s =
+                                snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
+                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                                * frame_time)
+                                .min(query_duration);
                             v1_intervals.push(TimeInterval::new(s, e));
                         }
                         cluster_start = f;
@@ -1264,11 +1451,21 @@ mod tests {
                 }
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
-                if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                    && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                if dur >= min_duration
+                    && (density >= min_density || cluster_hits >= min_hits)
+                    && verify_candidate_segment_pct(
+                        &query_raw_peaks,
+                        &raw_file.frame_peaks,
+                        cluster_start,
+                        cluster_end,
+                        delta,
+                    )
+                    .is_some()
                 {
                     let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                        * frame_time)
+                        .min(query_duration);
                     v1_intervals.push(TimeInterval::new(s, e));
                 }
             }
@@ -1303,7 +1500,11 @@ mod tests {
             let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             let ref_landmarks: Vec<RefLandmark> = ref_fps
                 .iter()
-                .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                .map(|fp| RefLandmark {
+                    hash: fp.hash,
+                    ref_idx: 0,
+                    r_frame: fp.frame,
+                })
                 .collect();
 
             let (matches_warm, _, _, _) = match_fingerprints_radix_map_warm_sliding_window(
@@ -1316,13 +1517,18 @@ mod tests {
 
             let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
             for m in matches_warm {
-                radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                radix_matches_group
+                    .entry(m.delta_q)
+                    .or_default()
+                    .push(m.q_frame);
             }
 
             let mut step_intervals: Vec<TimeInterval> = Vec::new();
 
             for (delta, mut frames) in radix_matches_group {
-                if frames.len() < 5 { continue; }
+                if frames.len() < 5 {
+                    continue;
+                }
                 frames.sort_unstable();
                 frames.dedup();
 
@@ -1337,11 +1543,22 @@ mod tests {
                     } else {
                         let dur = (cluster_end - cluster_start) as f64 * frame_time;
                         let density = cluster_hits as f64 / dur.max(0.1);
-                        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                            && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                        if dur >= min_duration
+                            && (density >= min_density || cluster_hits >= min_hits)
+                            && verify_candidate_segment_pct(
+                                &query_raw_peaks,
+                                &raw_file.frame_peaks,
+                                cluster_start,
+                                cluster_end,
+                                delta,
+                            )
+                            .is_some()
                         {
-                            let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                            let s =
+                                snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
+                            let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                                * frame_time)
+                                .min(query_duration);
                             step_intervals.push(TimeInterval::new(s, e));
                         }
                         cluster_start = f;
@@ -1351,11 +1568,21 @@ mod tests {
                 }
                 let dur = (cluster_end - cluster_start) as f64 * frame_time;
                 let density = cluster_hits as f64 / dur.max(0.1);
-                if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                    && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                if dur >= min_duration
+                    && (density >= min_density || cluster_hits >= min_hits)
+                    && verify_candidate_segment_pct(
+                        &query_raw_peaks,
+                        &raw_file.frame_peaks,
+                        cluster_start,
+                        cluster_end,
+                        delta,
+                    )
+                    .is_some()
                 {
                     let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                    let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                        * frame_time)
+                        .min(query_duration);
                     step_intervals.push(TimeInterval::new(s, e));
                 }
             }
@@ -1369,24 +1596,50 @@ mod tests {
         let time_v2 = start_v2.elapsed();
 
         eprintln!("\n==========================================================================================================");
-        eprintln!(" RADIX_MAP_1 vs RADIX_MAP_2 (INCREMENTAL DELETED-INTERVAL LANDMARK FILTERING)");
-        eprintln!(" Target Episode: 'A Day in the Life of a Gladiator' ({:.1}s / {:.2}m)", query_duration, query_duration / 60.0);
+        eprintln!("RADIX_MAP_1 vs RADIX_MAP_2 (INCREMENTAL DELETED-INTERVAL LANDMARK FILTERING)");
+        eprintln!(
+            "Target Episode: 'A Day in the Life of a Gladiator' ({:.1}s / {:.2}m)",
+            query_duration,
+            query_duration / 60.0
+        );
         eprintln!("==========================================================================================================");
-        eprintln!("{:<22} | {:<16} | {:<20} | {:<20}", "Approach Variant", "Total Execution", "Resulting Cut Time", "Initial Query Landmarks");
+        eprintln!(
+            "{:<22} | {:<16} | {:<20} | {:<20}",
+            "Approach Variant", "Total Execution", "Resulting Cut Time", "Initial Query Landmarks"
+        );
         eprintln!("----------------------------------------------------------------------------------------------------------");
-        eprintln!("{:<22} | {:<16} | {:<20} | {:<20}", "RadixMap 1 (Standard)", format!("{:.3}s", time_v1.as_secs_f64()), format!("{:.1}s ({:.2}m)", v1_cut_dur, v1_cut_dur / 60.0), initial_query_landmarks.len());
-        eprintln!("{:<22} | {:<16} | {:<20} | {:<20}", "RadixMap 2 (Filtered)", format!("{:.3}s", time_v2.as_secs_f64()), format!("{:.1}s ({:.2}m)", v2_cut_dur, v2_cut_dur / 60.0), landmark_counts_history.last().map(|(_, n)| *n).unwrap_or(0));
+        eprintln!(
+            "{:<22} | {:<16} | {:<20} | {:<20}",
+            "RadixMap 1 (Standard)",
+            format!("{:.3}s", time_v1.as_secs_f64()),
+            format!("{:.1}s ({:.2}m)", v1_cut_dur, v1_cut_dur / 60.0),
+            initial_query_landmarks.len()
+        );
+        eprintln!(
+            "{:<22} | {:<16} | {:<20} | {:<20}",
+            "RadixMap 2 (Filtered)",
+            format!("{:.3}s", time_v2.as_secs_f64()),
+            format!("{:.1}s ({:.2}m)", v2_cut_dur, v2_cut_dur / 60.0),
+            landmark_counts_history.last().map(|(_, n)| *n).unwrap_or(0)
+        );
         eprintln!("==========================================================================================================\n");
 
         eprintln!("--- Query Landmark Shrinkage History in RadixMap 2 ---");
         for (step, count) in landmark_counts_history {
             let pct = (count as f64 / initial_query_landmarks.len() as f64) * 100.0;
-            eprintln!("  After Ref Episode #{:2}: {:6} landmarks remaining ({:.1}% of original)", step, count, pct);
+            eprintln!(
+                "  After Ref Episode #{:2}: {:6} landmarks remaining ({:.1}% of original)",
+                step, count, pct
+            );
         }
         eprintln!("==========================================================================================================\n");
 
         let diff = (v1_cut_dur - v2_cut_dur).abs();
-        eprintln!("Difference in cut duration: {:.2}s ({:.1}%)", diff, (diff / v1_cut_dur) * 100.0);
+        eprintln!(
+            "Difference in cut duration: {:.2}s ({:.1}%)",
+            diff,
+            (diff / v1_cut_dur) * 100.0
+        );
     }
 
     #[test]
@@ -1397,7 +1650,10 @@ mod tests {
 
         let base_dir = Path::new("/media/podcasts/clean/Dan Snow's History Hit");
         if !base_dir.exists() {
-            eprintln!("Directory {:?} does not exist, skipping heavy hash test", base_dir);
+            eprintln!(
+                "Directory {:?} does not exist, skipping heavy hash test",
+                base_dir
+            );
             return;
         }
 
@@ -1412,7 +1668,10 @@ mod tests {
         }
 
         eprintln!("\n=========================================================================================");
-        eprintln!("   HEAVY HASH FRACTION MEASUREMENT (Across {} .fp files in Dan Snow's History Hit)", fp_files.len());
+        eprintln!(
+            "   HEAVY HASH FRACTION MEASUREMENT (Across {} .fp files in Dan Snow's History Hit)",
+            fp_files.len()
+        );
         eprintln!("=========================================================================================");
 
         let mut hash_counts: HashMap<u32, usize> = HashMap::new();
@@ -1429,10 +1688,17 @@ mod tests {
         }
 
         let thresholds = [50, 100, 200, 500, 1000];
-        eprintln!("Total Landmarks generated across all {} .fp files: {}", fp_files.len(), total_landmarks);
+        eprintln!(
+            "Total Landmarks generated across all {} .fp files: {}",
+            fp_files.len(),
+            total_landmarks
+        );
         eprintln!("Total Unique Hashes: {}\n", hash_counts.len());
 
-        eprintln!("{:<15} | {:<20} | {:<20} | {:<16}", "Threshold (>N)", "Heavy Unique Hashes", "Heavy Landmarks Count", "Fraction of Total");
+        eprintln!(
+            "{:<15} | {:<20} | {:<20} | {:<16}",
+            "Threshold (>N)", "Heavy Unique Hashes", "Heavy Landmarks Count", "Fraction of Total"
+        );
         eprintln!("-----------------------------------------------------------------------------------------");
 
         for &t in &thresholds {
@@ -1473,7 +1739,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping sweep test", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping sweep test",
+                target_mp3
+            );
             return;
         }
 
@@ -1501,7 +1770,10 @@ mod tests {
         let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
         let query_landmarks: Vec<QueryLandmark> = query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let ref_raw_files: Vec<_> = ref_fp_paths
@@ -1512,10 +1784,22 @@ mod tests {
         let max_thresholds = [1, 2, 12];
 
         eprintln!("\n==========================================================================================================");
-        eprintln!(" RADIX_MAP_1 MAX_HASH_OCCURRENCES SWEEP BENCHMARK (Target: 'A Day in the Life of a Gladiator')");
-        eprintln!(" Target Duration: {:.1}s ({:.2}m) | Reference Episodes: {}", query_duration, query_duration / 60.0, ref_fp_paths.len());
+        eprintln!("RADIX_MAP_1 MAX_HASH_OCCURRENCES SWEEP BENCHMARK (Target: 'A Day in the Life of a Gladiator')");
+        eprintln!(
+            " Target Duration: {:.1}s ({:.2}m) | Reference Episodes: {}",
+            query_duration,
+            query_duration / 60.0,
+            ref_fp_paths.len()
+        );
         eprintln!("==========================================================================================================");
-        eprintln!("{:<18} | {:<16} | {:<20} | {:<18} | {:<16}", "Max Occurrences", "Execution Time", "Resulting Cut Time", "Emitted Warm Pairs", "Diff vs 200");
+        eprintln!(
+            "{:<18} | {:<16} | {:<20} | {:<18} | {:<16}",
+            "Max Occurrences",
+            "Execution Time",
+            "Resulting Cut Time",
+            "Emitted Warm Pairs",
+            "Diff vs 200"
+        );
         eprintln!("----------------------------------------------------------------------------------------------------------");
 
         let mut baseline_cut_sec = 0.0f64;
@@ -1526,28 +1810,39 @@ mod tests {
             let mut total_warm_pairs_emitted = 0usize;
 
             for raw_file in &ref_raw_files {
-                let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
+                let ref_fps =
+                    generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
                 let ref_landmarks: Vec<RefLandmark> = ref_fps
                     .iter()
-                    .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                    .map(|fp| RefLandmark {
+                        hash: fp.hash,
+                        ref_idx: 0,
+                        r_frame: fp.frame,
+                    })
                     .collect();
 
-                let (matches_warm, _, warm_emitted, _) = match_fingerprints_radix_map_warm_sliding_window(
-                    ref_landmarks,
-                    query_landmarks.clone(),
-                    max_occ,
-                    21,
-                    20,
-                );
+                let (matches_warm, _, warm_emitted, _) =
+                    match_fingerprints_radix_map_warm_sliding_window(
+                        ref_landmarks,
+                        query_landmarks.clone(),
+                        max_occ,
+                        21,
+                        20,
+                    );
                 total_warm_pairs_emitted += warm_emitted;
 
                 let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
                 for m in matches_warm {
-                    radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                    radix_matches_group
+                        .entry(m.delta_q)
+                        .or_default()
+                        .push(m.q_frame);
                 }
 
                 for (delta, mut frames) in radix_matches_group {
-                    if frames.len() < 5 { continue; }
+                    if frames.len() < 5 {
+                        continue;
+                    }
                     frames.sort_unstable();
                     frames.dedup();
 
@@ -1562,11 +1857,23 @@ mod tests {
                         } else {
                             let dur = (cluster_end - cluster_start) as f64 * frame_time;
                             let density = cluster_hits as f64 / dur.max(0.1);
-                            if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                                && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                            if dur >= min_duration
+                                && (density >= min_density || cluster_hits >= min_hits)
+                                && verify_candidate_segment_pct(
+                                    &query_raw_peaks,
+                                    &raw_file.frame_peaks,
+                                    cluster_start,
+                                    cluster_end,
+                                    delta,
+                                )
+                                .is_some()
                             {
-                                let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                                let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                                let s = snap_to_silence(&query_energies, cluster_start) as f64
+                                    * frame_time;
+                                let e = ((snap_to_silence(&query_energies, cluster_end) as f64
+                                    + 1.0)
+                                    * frame_time)
+                                    .min(query_duration);
                                 v1_intervals.push(TimeInterval::new(s, e));
                             }
                             cluster_start = f;
@@ -1576,11 +1883,21 @@ mod tests {
                     }
                     let dur = (cluster_end - cluster_start) as f64 * frame_time;
                     let density = cluster_hits as f64 / dur.max(0.1);
-                    if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-                        && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                    if dur >= min_duration
+                        && (density >= min_density || cluster_hits >= min_hits)
+                        && verify_candidate_segment_pct(
+                            &query_raw_peaks,
+                            &raw_file.frame_peaks,
+                            cluster_start,
+                            cluster_end,
+                            delta,
+                        )
+                        .is_some()
                     {
                         let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                            * frame_time)
+                            .min(query_duration);
                         v1_intervals.push(TimeInterval::new(s, e));
                     }
                 }
@@ -1629,7 +1946,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping max=1 tuning test", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping max=1 tuning test",
+                target_mp3
+            );
             return;
         }
 
@@ -1654,7 +1974,10 @@ mod tests {
         let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
         let query_landmarks: Vec<QueryLandmark> = query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let ref_raw_files: Vec<_> = ref_fp_paths
@@ -1666,9 +1989,21 @@ mod tests {
         let baseline_cut_dur = 361.16f64;
 
         eprintln!("\n====================================================================================================================================");
-        eprintln!(" FINE GRID SEARCH: MAX_HASH_OCCURRENCES = 4 PARAMETER TUNING (Baseline target: 361.2s)");
+        eprintln!(
+            "FINE GRID SEARCH: MAX_HASH_OCCURRENCES = 4 PARAMETER TUNING (Baseline target: 361.2s)"
+        );
         eprintln!("====================================================================================================================================");
-        eprintln!("{:<6} | {:<6} | {:<8} | {:<8} | {:<8} | {:<16} | {:<20} | {:<16}", "W", "T", "MaxGap", "MinHits", "MinDens", "Execution Time", "Resulting Cut Time", "Diff vs 361.2s");
+        eprintln!(
+            "{:<6} | {:<6} | {:<8} | {:<8} | {:<8} | {:<16} | {:<20} | {:<16}",
+            "W",
+            "T",
+            "MaxGap",
+            "MinHits",
+            "MinDens",
+            "Execution Time",
+            "Resulting Cut Time",
+            "Diff vs 361.2s"
+        );
         eprintln!("------------------------------------------------------------------------------------------------------------------------------------");
 
         // Fine grid search configurations for MAX = 4
@@ -1696,10 +2031,15 @@ mod tests {
             let mut v1_intervals: Vec<TimeInterval> = Vec::new();
 
             for raw_file in &ref_raw_files {
-                let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
+                let ref_fps =
+                    generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
                 let ref_landmarks: Vec<RefLandmark> = ref_fps
                     .iter()
-                    .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                    .map(|fp| RefLandmark {
+                        hash: fp.hash,
+                        ref_idx: 0,
+                        r_frame: fp.frame,
+                    })
                     .collect();
 
                 let (matches_warm, _, _, _) = match_fingerprints_radix_map_warm_sliding_window(
@@ -1712,11 +2052,16 @@ mod tests {
 
                 let mut radix_matches_group: HashMap<i32, Vec<u32>> = HashMap::new();
                 for m in matches_warm {
-                    radix_matches_group.entry(m.delta_q).or_default().push(m.q_frame);
+                    radix_matches_group
+                        .entry(m.delta_q)
+                        .or_default()
+                        .push(m.q_frame);
                 }
 
                 for (delta, mut frames) in radix_matches_group {
-                    if frames.len() < 3 { continue; }
+                    if frames.len() < 3 {
+                        continue;
+                    }
                     frames.sort_unstable();
                     frames.dedup();
 
@@ -1731,11 +2076,23 @@ mod tests {
                         } else {
                             let dur = (cluster_end - cluster_start) as f64 * frame_time;
                             let density = cluster_hits as f64 / dur.max(0.1);
-                            if dur >= 10.0 && (density >= min_density || cluster_hits >= min_hits)
-                                && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                            if dur >= 10.0
+                                && (density >= min_density || cluster_hits >= min_hits)
+                                && verify_candidate_segment_pct(
+                                    &query_raw_peaks,
+                                    &raw_file.frame_peaks,
+                                    cluster_start,
+                                    cluster_end,
+                                    delta,
+                                )
+                                .is_some()
                             {
-                                let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                                let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                                let s = snap_to_silence(&query_energies, cluster_start) as f64
+                                    * frame_time;
+                                let e = ((snap_to_silence(&query_energies, cluster_end) as f64
+                                    + 1.0)
+                                    * frame_time)
+                                    .min(query_duration);
                                 v1_intervals.push(TimeInterval::new(s, e));
                             }
                             cluster_start = f;
@@ -1745,11 +2102,21 @@ mod tests {
                     }
                     let dur = (cluster_end - cluster_start) as f64 * frame_time;
                     let density = cluster_hits as f64 / dur.max(0.1);
-                    if dur >= 10.0 && (density >= min_density || cluster_hits >= min_hits)
-                        && verify_candidate_segment_pct(&query_raw_peaks, &raw_file.frame_peaks, cluster_start, cluster_end, delta).is_some()
+                    if dur >= 10.0
+                        && (density >= min_density || cluster_hits >= min_hits)
+                        && verify_candidate_segment_pct(
+                            &query_raw_peaks,
+                            &raw_file.frame_peaks,
+                            cluster_start,
+                            cluster_end,
+                            delta,
+                        )
+                        .is_some()
                     {
                         let s = snap_to_silence(&query_energies, cluster_start) as f64 * frame_time;
-                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0) * frame_time).min(query_duration);
+                        let e = ((snap_to_silence(&query_energies, cluster_end) as f64 + 1.0)
+                            * frame_time)
+                            .min(query_duration);
                         v1_intervals.push(TimeInterval::new(s, e));
                     }
                 }
@@ -1793,7 +2160,10 @@ mod tests {
         let target_mp3 = base_dir.join("A Day in the Life of a Gladiator.mp3.precut");
 
         if !target_mp3.exists() {
-            eprintln!("Target MP3 {:?} does not exist, skipping optimized test", target_mp3);
+            eprintln!(
+                "Target MP3 {:?} does not exist, skipping optimized test",
+                target_mp3
+            );
             return;
         }
 
@@ -1816,7 +2186,10 @@ mod tests {
         let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
         let query_landmarks: Vec<QueryLandmark> = query_fingerprints
             .iter()
-            .map(|fp| QueryLandmark { hash: fp.hash, q_frame: fp.frame })
+            .map(|fp| QueryLandmark {
+                hash: fp.hash,
+                q_frame: fp.frame,
+            })
             .collect();
 
         let ref_raw_files: Vec<_> = ref_fp_paths
@@ -1832,7 +2205,11 @@ mod tests {
             let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
             let ref_landmarks: Vec<RefLandmark> = ref_fps
                 .iter()
-                .map(|fp| RefLandmark { hash: fp.hash, ref_idx: 0, r_frame: fp.frame })
+                .map(|fp| RefLandmark {
+                    hash: fp.hash,
+                    ref_idx: 0,
+                    r_frame: fp.frame,
+                })
                 .collect();
 
             let intervals = match_fingerprints_radix_map_optimized(
@@ -1852,12 +2229,21 @@ mod tests {
         let elapsed = start.elapsed();
 
         eprintln!("\n==========================================================================================================");
-        eprintln!(" match_fingerprints_radix_map_optimized (RadixMapConfig::default)");
-        eprintln!(" Target Episode: 'A Day in the Life of a Gladiator' (2530.2s / 42.17m)");
-        eprintln!(" Total Execution Time: {:.3}s | Resulting Cut Duration: {:.1}s ({:.2}m)", elapsed.as_secs_f64(), cut_sec, cut_sec / 60.0);
-        eprintln!(" Config: {:?}", config);
+        eprintln!("match_fingerprints_radix_map_optimized (RadixMapConfig::default)");
+        eprintln!("Target Episode: 'A Day in the Life of a Gladiator' (2530.2s / 42.17m)");
+        eprintln!(
+            " Total Execution Time: {:.3}s | Resulting Cut Duration: {:.1}s ({:.2}m)",
+            elapsed.as_secs_f64(),
+            cut_sec,
+            cut_sec / 60.0
+        );
+        eprintln!("Config: {:?}", config);
         eprintln!("==========================================================================================================\n");
 
-        assert!(cut_sec >= 361.0, "Optimized engine must recover full ad cuts (expected >= 361.0s, got {:.1}s)", cut_sec);
+        assert!(
+            cut_sec >= 361.0,
+            "Optimized engine must recover full ad cuts (expected >= 361.0s, got {:.1}s)",
+            cut_sec
+        );
     }
 }
