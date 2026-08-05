@@ -126,3 +126,33 @@ This document provides a technical guide for AI coding agents (such as Antigravi
 2. **Preserve Compatibility with CLI Subcommands**: Ensure `preprocess`, `cut`, `handle_dir`, `root_dir`, `watch`, `benchmark`, and `scan-test` retain backward compatibility with aliases.
 3. **Never Remove Verification Pass or Silence Snapping**: These passes prevent false cuts and speech clipping.
 4. **Module Boundaries**: Keep `audio.rs` focused on signal processing, `fingerprint.rs` on matching logic, `cut.rs` on FFmpeg integration, `dir.rs` on directory workflows, `tags.rs` on ID3 metadata, `fp.rs` on file format, and `report.rs` on HTML generation.
+
+---
+
+## 6. Release & Versioning Workflow
+
+### Commit Frequently
+- Commit code changes as soon as a feature or bug fix is complete
+- Each commit should represent a logical, testable unit of work
+- Use descriptive commit messages following conventional commit style
+
+### Document Changes
+- When adding a new feature, updating behavior, or fixing a bug, document it in `CHANGELOG.md` under the `[Unreleased]` section
+- Use bullet points with `* **Feature**: Description` format
+- Group changes by category: Added, Changed, Fixed, etc.
+
+### Version Bumping
+- After documenting changes in `CHANGELOG.md`, bump the version using the provided script:
+  ```bash
+  ./scripts/bump-version
+  ```
+- This script:
+  - Verifies the code compiles successfully with `cargo build --release`
+  - Increments the patch version (0.0.1)
+  - Updates `Cargo.toml` and `CHANGELOG.md`
+  - Only proceeds if compilation succeeds
+
+### Release Process
+1. Ensure all changes are committed
+2. Run `./scripts/bump-version`
+3. Push commits to trigger CI/CD
