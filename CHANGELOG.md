@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+* **Version**: Bumped to 0.3.1
+
 ### Added
 * **Autoload `.fp` files for query extraction**: When a `.fp` file exists for the query file, peaks are loaded from it instead of re-extracting with FFmpeg. FFmpeg is now only used for preprocessing and final splicing.
 * **`--rerun` flag**: For `cut`, `handle-dir`, `root-dir`, and `watch` subcommands. When passed, skips analysis if `.cuts.json` exists, otherwise runs analysis first (which saves the file).
