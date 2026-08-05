@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use terminal_size::terminal_size;
+use which::which;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -65,6 +66,17 @@ impl Config {
         if !self.postproc_enabled {
             return;
         }
+        let program = self.postproc_program.trim();
+        if program.is_empty() {
+            return;
+        }
+        let program_path = match which(program) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("Error: post-processing program not found: {}", program);
+                return;
+            }
+        };
         let width = terminal_size().map(|(w, _)| w.0 as usize).unwrap_or(72);
         let fname = file_path.display().to_string();
         let title = format!("─── Post-processor: {} ", fname);
@@ -73,7 +85,7 @@ impl Config {
         let dash = "─".cyan();
         println!();
         println!("{}{}{}", "╭".cyan(), title.cyan().bold(), dash.repeat(pad));
-        match Command::new(&self.postproc_program)
+        match Command::new(program_path)
             .arg(file_path)
             .output()
         {
