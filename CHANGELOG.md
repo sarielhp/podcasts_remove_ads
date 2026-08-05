@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Changed
+* **Version**: Bumped to 0.3.3
+
+### Changed
 * **Version**: Bumped to 0.3.2
 
 ### Changed
