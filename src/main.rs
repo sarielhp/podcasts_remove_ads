@@ -22,6 +22,33 @@ const CLI_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().bold())
     .placeholder(AnsiColor::White.on_default().dimmed());
 
+#[derive(clap::Args, Debug, Clone)]
+struct CommonCutArgs {
+    /// Number of peaks to evaluate during the cut phase (1, 2, 4, or 8) [default: 4]
+    #[arg(long, default_value_t = 4)]
+    eval_peaks: usize,
+
+    /// Minimum matching duration in seconds to trigger a cut [default: 10]
+    #[arg(long, default_value_t = 10.0)]
+    min_duration: f64,
+
+    /// Analyze and report cuts without modifying any files
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Generate HTML inspection report
+    #[arg(long)]
+    html: bool,
+
+    /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+    #[arg(long, alias = "re-encode", alias = "crossfade")]
+    crossfade: bool,
+
+    /// Skip analysis if .cuts.json exists, otherwise run analysis first
+    #[arg(long)]
+    rerun: bool,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "podcasts_remove_ads",
@@ -47,7 +74,7 @@ enum Commands {
         output: Option<PathBuf>,
     },
     /// Cut matching segments >= 10s from a target MP3 using reference index files
-Cut {
+    Cut {
         /// Target MP3 file to cut
         input: PathBuf,
 
@@ -59,29 +86,8 @@ Cut {
         #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
 
-        /// Number of peaks to evaluate during the cut phase (1, 2, 4, or 8) [default: 4]
-        #[arg(long, default_value_t = 4)]
-        eval_peaks: usize,
-
-        /// Minimum matching duration in seconds to trigger a cut [default: 10]
-        #[arg(long, default_value_t = 10.0)]
-        min_duration: f64,
-
-        /// Analyze and report cuts without modifying any files
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Generate HTML inspection report
-        #[arg(long)]
-        html: bool,
-
-        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
-        #[arg(long, alias = "re-encode", alias = "crossfade")]
-        crossfade: bool,
-
-        /// Skip analysis if .cuts.json exists, otherwise run analysis first
-        #[arg(long)]
-        rerun: bool,
+        #[command(flatten)]
+        cut_args: CommonCutArgs,
     },
     /// Scan directory, preprocess missing files, and cut against the latest 10 MP3s
     #[command(alias = "handle_dir")]
@@ -89,17 +95,8 @@ Cut {
         /// Directory containing MP3 files
         dir: PathBuf,
 
-        /// Number of peaks to evaluate during the cut phase (1, 2, 4, or 8) [default: 4]
-        #[arg(long, default_value_t = 4)]
-        eval_peaks: usize,
-
-        /// Minimum matching duration in seconds to trigger a cut [default: 10]
-        #[arg(long, default_value_t = 10.0)]
-        min_duration: f64,
-
-        /// Analyze and report cuts without modifying any files
-        #[arg(long)]
-        dry_run: bool,
+        #[command(flatten)]
+        cut_args: CommonCutArgs,
 
         /// Cut at most N files and exit (0 = unlimited) [default: 0]
         #[arg(short = 'n', long = "num", default_value_t = 0)]
@@ -112,18 +109,6 @@ Cut {
         /// Enable verbose output
         #[arg(short = 'v', long = "verbose")]
         verbose: bool,
-
-        /// Generate HTML inspection report [default: off]
-        #[arg(long)]
-        html: bool,
-
-        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
-        #[arg(long, alias = "re-encode", alias = "crossfade")]
-        crossfade: bool,
-
-        /// Skip analysis if .cuts.json exists, otherwise run analysis first
-        #[arg(long)]
-        rerun: bool,
     },
     /// Find subdirectories in a root directory and process each one independently
     #[command(alias = "root_dir")]
@@ -131,17 +116,8 @@ Cut {
         /// Parent root directory containing subdirectories of MP3 files
         dir: PathBuf,
 
-        /// Number of peaks to evaluate during the cut phase (1, 2, 4, or 8) [default: 4]
-        #[arg(long, default_value_t = 4)]
-        eval_peaks: usize,
-
-        /// Minimum matching duration in seconds to trigger a cut [default: 10]
-        #[arg(long, default_value_t = 10.0)]
-        min_duration: f64,
-
-        /// Analyze and report cuts without modifying any files
-        #[arg(long)]
-        dry_run: bool,
+        #[command(flatten)]
+        cut_args: CommonCutArgs,
 
         /// Cut at most N files and exit (0 = unlimited) [default: 0]
         #[arg(short = 'n', long = "num", default_value_t = 0)]
@@ -154,31 +130,14 @@ Cut {
         /// Enable verbose output
         #[arg(short = 'v', long = "verbose")]
         verbose: bool,
-
-        /// Generate HTML inspection report
-        #[arg(long)]
-        html: bool,
-
-        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
-        #[arg(long, alias = "re-encode", alias = "crossfade")]
-        crossfade: bool,
-
-        /// Skip analysis if .cuts.json exists, otherwise run analysis first
-        #[arg(long)]
-        rerun: bool,
     },
     /// Watch a directory continuously and process new MP3 files automatically
     Watch {
         /// Directory to watch for new MP3 files
         dir: PathBuf,
 
-        /// Number of peaks to evaluate during the cut phase (1, 2, 4, or 8) [default: 4]
-        #[arg(long, default_value_t = 4)]
-        eval_peaks: usize,
-
-        /// Minimum matching duration in seconds to trigger a cut [default: 10]
-        #[arg(long, default_value_t = 10.0)]
-        min_duration: f64,
+        #[command(flatten)]
+        cut_args: CommonCutArgs,
 
         /// Cut at most N files and exit (0 = unlimited) [default: 0]
         #[arg(short = 'n', long = "num", default_value_t = 0)]
@@ -191,18 +150,6 @@ Cut {
         /// Enable verbose output
         #[arg(short = 'v', long = "verbose")]
         verbose: bool,
-
-        /// Generate HTML inspection report
-        #[arg(long)]
-        html: bool,
-
-/// Re-encode segments with crossfade for smooth transitions (slower, lossy)
-        #[arg(long, alias = "re-encode", alias = "crossfade")]
-        crossfade: bool,
-
-        /// Skip analysis if .cuts.json exists, otherwise run analysis first
-        #[arg(long)]
-        rerun: bool,
     },
     /// Benchmark raw peak storage and evaluation counts against the old pre-computed pairs method
     Benchmark {
@@ -240,13 +187,8 @@ Cut {
         #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
 
-        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
-        #[arg(long, alias = "re-encode", alias = "crossfade")]
-        crossfade: bool,
-
-        /// Analyze and report cuts without modifying any files
-        #[arg(long)]
-        dry_run: bool,
+        #[command(flatten)]
+        cut_args: CommonCutArgs,
     },
     /// View or modify the program configuration
     #[command(alias = "cfg")]
@@ -288,12 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             indexes,
             output,
-            eval_peaks,
-            min_duration,
-            dry_run,
-            html,
-            crossfade,
-            rerun,
+            cut_args,
         } => {
             if indexes.is_empty() {
                 eprintln!("Error: --index (-i) must specify at least one reference index (.fp) file.");
@@ -308,14 +245,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &input,
                 &indexes,
                 &out_path,
-                eval_peaks,
-                min_duration,
-                dry_run,
-                html,
-                !crossfade,
-                rerun,
+                cut_args.eval_peaks,
+                cut_args.min_duration,
+                cut_args.dry_run,
+                cut_args.html,
+                !cut_args.crossfade,
+                cut_args.rerun,
             )?;
-            if do_swap && !dry_run {
+            if do_swap && !cut_args.dry_run {
                 commit_cut_result(&input, &out_path, res.cut_dur)?;
             }
             println!(
@@ -324,50 +261,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format_duration(res.new_dur),
                 format_duration(res.cut_dur),
             );
-            if do_swap && !dry_run {
+            if do_swap && !cut_args.dry_run {
                 cfg.run_postproc(&input);
             }
         }
         Commands::HandleDir {
             dir,
-            eval_peaks,
-            min_duration,
-            dry_run,
+            cut_args,
             max_cut,
             preproc,
             verbose,
-            html,
-            crossfade,
-            rerun,
         } => {
-            dir::run_handle_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
+            dir::run_handle_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::RootDir {
             dir,
-            eval_peaks,
-            min_duration,
-            dry_run,
+            cut_args,
             max_cut,
             preproc,
             verbose,
-            html,
-            crossfade,
-            rerun,
         } => {
-            dir::run_root_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
+            dir::run_root_dir(&dir, cut_args.eval_peaks, cut_args.min_duration, cut_args.dry_run, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::Watch {
             dir,
-            eval_peaks,
-            min_duration,
+            cut_args,
             max_cut,
             preproc,
             verbose,
-            html,
-            crossfade,
-            rerun,
         } => {
-            dir::run_watch_mode(&dir, eval_peaks, min_duration, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
+            dir::run_watch_mode(&dir, cut_args.eval_peaks, cut_args.min_duration, preproc, max_cut, verbose, cut_args.html, !cut_args.crossfade, cut_args.rerun, &cfg)?;
         }
         Commands::Benchmark { dir } => {
             benchmark::run_benchmark_all(&dir)?;
@@ -381,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ResortFp { dir } => {
             fp::run_resort_fp_dir(&dir)?;
         }
-        Commands::ApplyCuts { input, cuts_json, output, crossfade, dry_run } => {
+        Commands::ApplyCuts { input, cuts_json, output, cut_args } => {
             let output_path = output.unwrap_or_else(|| {
                 if input.extension().and_then(|e| e.to_str()) == Some("precut") {
                     input.with_extension("")
@@ -389,7 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input.clone()
                 }
             });
-            if let Err(e) = crate::fingerprint::apply_cuts_from_json(&input, &cuts_json, &output_path, !crossfade, dry_run) {
+            if let Err(e) = crate::fingerprint::apply_cuts_from_json(&input, &cuts_json, &output_path, !cut_args.crossfade, cut_args.dry_run) {
                 eprintln!("Error applying cuts: {}", e);
                 std::process::exit(1);
             }
