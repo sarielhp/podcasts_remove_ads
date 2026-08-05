@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINARY="podcasts_remove_ads"
+DEST_DIR="${HOME}/misc/bin_local"
+LINK_DIR="${HOME}/bin"
+
+cargo build --release
+
+mkdir -p "$DEST_DIR"
+
+rm -f "$DEST_DIR/$BINARY"
+rm -f "$LINK_DIR/$BINARY"
+
+cp "target/release/$BINARY" "$DEST_DIR/$BINARY"
+ln -s "$DEST_DIR/$BINARY" "$LINK_DIR/$BINARY"
+
+echo "Installed $BINARY to $DEST_DIR/$BINARY"
+echo "Linked from $LINK_DIR/$BINARY"

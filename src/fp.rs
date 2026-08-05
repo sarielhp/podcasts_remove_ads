@@ -81,6 +81,13 @@ pub fn commit_cut_result(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let precut = precut_path(original);
     fs::rename(original, &precut)?;
+
+    let temp_cuts_json = temp.with_extension("cuts.json");
+    let final_cuts_json = original.with_extension("cuts.json");
+    if temp_cuts_json.exists() {
+        let _ = fs::rename(&temp_cuts_json, &final_cuts_json);
+    }
+
     let result = if cut_dur > 0.0 {
         fs::rename(temp, original)
             .map_err(|e| format!("failed to move cut result: {}", e))
@@ -102,7 +109,7 @@ pub fn commit_cut_result(
     result.map_err(|e| e.into())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TimeInterval {
     pub start: f64,
     pub end: f64,
@@ -114,6 +121,42 @@ impl TimeInterval {
     }
     pub fn duration(&self) -> f64 {
         self.end - self.start
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CutIntervalDetail {
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub duration_sec: f64,
+    pub start_formatted: String,
+    pub end_formatted: String,
+    pub reference_file: String,
+    pub match_similarity_pct: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CutsFile {
+    pub version: u32,
+    pub target_file: String,
+    pub original_duration_sec: f64,
+    pub total_cut_duration_sec: f64,
+    pub cut_intervals: Vec<CutIntervalDetail>,
+    pub merged_cut_intervals: Vec<TimeInterval>,
+    pub keep_intervals: Vec<TimeInterval>,
+}
+
+impl CutsFile {
+    pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let json_str = serde_json::to_string_pretty(self)?;
+        fs::write(path, json_str)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let json_str = fs::read_to_string(path)?;
+        let cuts_file: Self = serde_json::from_str(&json_str)?;
+        Ok(cuts_file)
     }
 }
 
@@ -138,7 +181,9 @@ pub fn save_raw_peaks_file(
     writer.write_all(&(MAX_RAW_PEAKS_STORED as u32).to_le_bytes())?;
 
     for i in 0..data.frame_peaks.len() {
-        let peaks = &data.frame_peaks[i];
+        let mut peaks = data.frame_peaks[i].clone();
+        peaks.sort_unstable();
+
         let energy = if i < data.frame_energies.len() {
             data.frame_energies[i]
         } else {
@@ -148,7 +193,7 @@ pub fn save_raw_peaks_file(
         let count = peaks.len() as u8;
         writer.write_all(&[count])?;
         writer.write_all(&energy.to_le_bytes())?;
-        for &p in peaks {
+        for &p in &peaks {
             writer.write_all(&p.to_le_bytes())?;
         }
     }
@@ -299,4 +344,101 @@ pub fn run_preprocess(
         );
     }
     Ok(())
+}
+
+fn find_fp_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with('.') {
+                find_fp_files_recursive(&path, results)?;
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("fp") {
+            results.push(path);
+        }
+    }
+    Ok(())
+}
+
+pub fn run_resort_fp_dir(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fp_files = Vec::new();
+    find_fp_files_recursive(dir, &mut fp_files)?;
+
+    if fp_files.is_empty() {
+        println!("No .fp files found in {:?}", dir);
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        format!("=== Re-sorting {} .fp file(s) in {:?} ===", fp_files.len(), dir)
+            .yellow()
+            .bold()
+    );
+
+    fp_files.par_iter().for_each(|path| {
+        if let Ok(mut data) = load_raw_peaks_file(path) {
+            for peaks in &mut data.frame_peaks {
+                peaks.sort_unstable();
+            }
+            if let Err(e) = save_raw_peaks_file(path, &data) {
+                eprintln!("Error re-saving sorted .fp {:?}: {}", path, e);
+            }
+        } else {
+            eprintln!("Error loading .fp file {:?}", path);
+        }
+    });
+
+    println!(
+        "{}",
+        format!("Successfully re-sorted {} .fp file(s)!", fp_files.len())
+            .green()
+            .bold()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cuts_file_serde() {
+        let cuts_file = CutsFile {
+            version: 1,
+            target_file: "test_episode.mp3".to_string(),
+            original_duration_sec: 2500.0,
+            total_cut_duration_sec: 170.3,
+            cut_intervals: vec![CutIntervalDetail {
+                start_sec: 12.5,
+                end_sec: 182.8,
+                duration_sec: 170.3,
+                start_formatted: "00:12".to_string(),
+                end_formatted: "03:02".to_string(),
+                reference_file: "ref1.fp".to_string(),
+                match_similarity_pct: 85.0,
+            }],
+            merged_cut_intervals: vec![TimeInterval::new(12.5, 182.8)],
+            keep_intervals: vec![TimeInterval::new(0.0, 12.5), TimeInterval::new(182.8, 2500.0)],
+        };
+
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_output.cuts.json");
+
+        cuts_file.save(&file_path).expect("save cuts file");
+        let loaded = CutsFile::load(&file_path).expect("load cuts file");
+
+        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.target_file, "test_episode.mp3");
+        assert_eq!(loaded.cut_intervals.len(), 1);
+        assert_eq!(loaded.keep_intervals.len(), 2);
+        assert!((loaded.total_cut_duration_sec - 170.3).abs() < 1e-6);
+
+        let _ = fs::remove_file(file_path);
+    }
 }

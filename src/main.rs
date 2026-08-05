@@ -12,6 +12,7 @@ mod cut;
 mod dir;
 mod fingerprint;
 mod fp;
+mod radix;
 mod report;
 mod tags;
 
@@ -73,8 +74,16 @@ Cut {
         /// Generate HTML inspection report
         #[arg(long)]
         html: bool,
+
+        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+        #[arg(long, alias = "re-encode", alias = "crossfade")]
+        crossfade: bool,
+
+        /// Skip analysis if .cuts.json exists, otherwise run analysis first
+        #[arg(long)]
+        rerun: bool,
     },
-/// Scan directory, preprocess missing files, and cut against the latest 10 MP3s
+    /// Scan directory, preprocess missing files, and cut against the latest 10 MP3s
     #[command(alias = "handle_dir")]
     HandleDir {
         /// Directory containing MP3 files
@@ -107,6 +116,14 @@ Cut {
         /// Generate HTML inspection report [default: off]
         #[arg(long)]
         html: bool,
+
+        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+        #[arg(long, alias = "re-encode", alias = "crossfade")]
+        crossfade: bool,
+
+        /// Skip analysis if .cuts.json exists, otherwise run analysis first
+        #[arg(long)]
+        rerun: bool,
     },
     /// Find subdirectories in a root directory and process each one independently
     #[command(alias = "root_dir")]
@@ -141,6 +158,14 @@ Cut {
         /// Generate HTML inspection report
         #[arg(long)]
         html: bool,
+
+        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+        #[arg(long, alias = "re-encode", alias = "crossfade")]
+        crossfade: bool,
+
+        /// Skip analysis if .cuts.json exists, otherwise run analysis first
+        #[arg(long)]
+        rerun: bool,
     },
     /// Watch a directory continuously and process new MP3 files automatically
     Watch {
@@ -170,6 +195,14 @@ Cut {
         /// Generate HTML inspection report
         #[arg(long)]
         html: bool,
+
+/// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+        #[arg(long, alias = "re-encode", alias = "crossfade")]
+        crossfade: bool,
+
+        /// Skip analysis if .cuts.json exists, otherwise run analysis first
+        #[arg(long)]
+        rerun: bool,
     },
     /// Benchmark raw peak storage and evaluation counts against the old pre-computed pairs method
     Benchmark {
@@ -186,6 +219,30 @@ Cut {
     FixOldNaming {
         /// Directory containing MP3 files to migrate
         dir: PathBuf,
+    },
+    /// Recursively find and re-sort all existing .fp files in a directory
+    #[command(name = "resort-fp", alias = "resort_fp")]
+    ResortFp {
+        /// Directory containing .fp files to re-sort
+        dir: PathBuf,
+    },
+    /// Apply cuts to a .precut or .mp3 file using a pre-generated .cuts.json file
+    #[command(name = "apply-cuts", alias = "apply_cuts")]
+    ApplyCuts {
+        /// Target MP3 or .precut file to cut
+        input: PathBuf,
+
+        /// Path to the .cuts.json file containing cut intervals
+        #[arg(short = 'c', long = "cuts")]
+        cuts_json: PathBuf,
+
+        /// Output cut MP3 path [default: <input>.mp3]
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+
+        /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
+        #[arg(long, alias = "re-encode", alias = "crossfade")]
+        crossfade: bool,
     },
     /// View or modify the program configuration
     #[command(alias = "cfg")]
@@ -231,6 +288,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_duration,
             dry_run,
             html,
+            crossfade,
+            rerun,
         } => {
             if indexes.is_empty() {
                 eprintln!("Error: --index (-i) must specify at least one reference index (.fp) file.");
@@ -249,6 +308,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_duration,
                 dry_run,
                 html,
+                !crossfade,
+                rerun,
             )?;
             if do_swap && !dry_run {
                 commit_cut_result(&input, &out_path, res.cut_dur)?;
@@ -272,8 +333,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
             html,
+            crossfade,
+            rerun,
         } => {
-            dir::run_handle_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, &cfg)?;
+            dir::run_handle_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
         }
         Commands::RootDir {
             dir,
@@ -284,8 +347,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
             html,
+            crossfade,
+            rerun,
         } => {
-            dir::run_root_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, &cfg)?;
+            dir::run_root_dir(&dir, eval_peaks, min_duration, dry_run, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
         }
         Commands::Watch {
             dir,
@@ -295,8 +360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preproc,
             verbose,
             html,
+            crossfade,
+            rerun,
         } => {
-            dir::run_watch_mode(&dir, eval_peaks, min_duration, preproc, max_cut, verbose, html, &cfg)?;
+            dir::run_watch_mode(&dir, eval_peaks, min_duration, preproc, max_cut, verbose, html, !crossfade, rerun, &cfg)?;
         }
         Commands::Benchmark { dir } => {
             benchmark::run_benchmark_all(&dir)?;
@@ -306,6 +373,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::FixOldNaming { dir } => {
             dir::run_fix_old_naming(&dir)?;
+        }
+        Commands::ResortFp { dir } => {
+            fp::run_resort_fp_dir(&dir)?;
+        }
+        Commands::ApplyCuts { input, cuts_json, output, crossfade } => {
+            let output_path = output.unwrap_or_else(|| {
+                if input.extension().and_then(|e| e.to_str()) == Some("precut") {
+                    input.with_extension("")
+                } else {
+                    input.clone()
+                }
+            });
+            if let Err(e) = crate::fingerprint::apply_cuts_from_json(&input, &cuts_json, &output_path, !crossfade) {
+                eprintln!("Error applying cuts: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Config {
             postproc,

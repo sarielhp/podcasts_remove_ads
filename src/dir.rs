@@ -22,6 +22,8 @@ pub fn run_watch_mode(
     max_cut: usize,
     verbose: bool,
     generate_html: bool,
+    stream_copy: bool,
+    rerun: bool,
     cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("===========================================================");
@@ -39,6 +41,8 @@ pub fn run_watch_mode(
         max_cut,
         verbose,
         generate_html,
+        stream_copy,
+        rerun,
         cfg,
     );
 
@@ -72,6 +76,8 @@ pub fn run_watch_mode(
                                         max_cut,
                                         verbose,
                                         generate_html,
+                                        stream_copy,
+                                        rerun,
                                         cfg,
                                     );
                                 } else {
@@ -84,6 +90,8 @@ pub fn run_watch_mode(
                                         max_cut,
                                         verbose,
                                         generate_html,
+                                        stream_copy,
+                                        rerun,
                                         cfg,
                                     );
                                 }
@@ -112,6 +120,8 @@ pub fn run_root_dir(
     max_cut: usize,
     verbose: bool,
     generate_html: bool,
+    stream_copy: bool,
+    rerun: bool,
     cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut subdirs = Vec::new();
@@ -189,6 +199,8 @@ let cut_count = cut_dir(
             remaining,
             verbose,
             generate_html,
+            stream_copy,
+            rerun,
             cfg,
         )?;
         if cut_count > 0 && verbose {
@@ -221,12 +233,14 @@ pub fn run_handle_dir(
     max_cut: usize,
     verbose: bool,
     generate_html: bool,
+    stream_copy: bool,
+    rerun: bool,
     cfg: &config::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = preprocess_dir(dir, eval_peaks, verbose)?;
 
     if !preproc {
-        cut_dir(dir, eval_peaks, min_duration, dry_run, max_cut, verbose, generate_html, cfg)?;
+        cut_dir(dir, eval_peaks, min_duration, dry_run, max_cut, verbose, generate_html, stream_copy, rerun, cfg)?;
     }
 
     Ok(())
@@ -237,17 +251,7 @@ fn preprocess_dir(
     eval_peaks: usize,
     verbose: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if verbose {
-        println!("Scanning directory {:?} for MP3 files...", dir);
-    }
     let mp3_files = find_mp3_files(dir)?;
-
-    if mp3_files.is_empty() {
-        if verbose {
-            println!("No original MP3 files found in {:?}", dir);
-        }
-        return Ok(false);
-    }
 
     if verbose {
         println!(
@@ -345,6 +349,8 @@ fn cut_dir(
     max_cut: usize,
     verbose: bool,
     generate_html: bool,
+    stream_copy: bool,
+    rerun: bool,
     cfg: &config::Config,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mp3_files = find_mp3_files(dir)?;
@@ -459,6 +465,8 @@ fn cut_dir(
             min_duration,
             dry_run,
             generate_html,
+            stream_copy,
+            rerun,
         ) {
             Ok(res) => {
                 if !dry_run

@@ -1,17 +1,11 @@
-use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::audio::{extract_raw_peaks, HOP_SIZE, SAMPLE_RATE};
+use crate::audio::extract_raw_peaks;
 use crate::cut::splice_audio_ffmpeg_crossfade;
-use crate::fp::{load_raw_peaks_file, TimeInterval};
+use crate::fp::{load_raw_peaks_file, CutIntervalDetail, CutsFile, TimeInterval};
 use crate::report::{generate_html_report, CutSegmentDetails};
 use crate::tags::copy_id3_tags_and_art;
-
-const MAX_HASH_OCCURRENCES: usize = 200;
-const MIN_CLUSTER_FRAMES: usize = 5;
-const CLUSTER_GAP_FRAMES: u32 = 30;
 const MERGE_GAP_TOLERANCE: f64 = 1.5;
 const INVERT_GAP_THRESHOLD: f64 = 0.1;
 const MIN_VERIFY_COMPARED: usize = 10;
@@ -36,7 +30,13 @@ pub struct CutConfig<'a> {
     pub min_hits: usize,
     pub dry_run: bool,
     pub generate_html: bool,
+    pub stream_copy: bool,
+    pub rerun: bool,
 }
+
+use crate::radix::{
+    match_fingerprints_radix_map_optimized, QueryLandmark, RadixMapConfig, RefLandmark,
+};
 
 pub fn process_cut(
     config: CutConfig,
@@ -51,20 +51,52 @@ pub fn process_cut(
         min_hits,
         dry_run,
         generate_html,
+        stream_copy,
+        rerun,
     } = config;
 
-    print!("\rLoading reference files...           ");
-    let _ = io::stdout().flush();
-    let mut raw_index: HashMap<u32, Vec<(usize, u32)>> = HashMap::new();
+    let cuts_json_path = output_mp3.with_extension("cuts.json");
+    if rerun && cuts_json_path.exists() {
+        let cuts_file = CutsFile::load(&cuts_json_path)?;
+        let keep_intervals = cuts_file.keep_intervals.clone();
+
+        // Apply cuts from saved intervals
+        if stream_copy {
+            crate::cut::splice_audio_ffmpeg_stream_copy(cut_mp3, &keep_intervals, output_mp3)?;
+        } else {
+            splice_audio_ffmpeg_crossfade(cut_mp3, &keep_intervals, output_mp3)?;
+        }
+
+        // Copy ID3 tags
+        if let Err(e) = copy_id3_tags_and_art(cut_mp3, output_mp3) {
+            eprintln!("Warning: failed to copy ID3 tags: {}", e);
+        }
+
+        let total_cut_sec = cuts_file.total_cut_duration_sec;
+        let query_duration = cuts_file.original_duration_sec;
+        let cut_details = cuts_file
+            .cut_intervals
+            .iter()
+            .map(|d| CutSegmentDetails {
+                start_sec: d.start_sec,
+                end_sec: d.end_sec,
+                duration_sec: d.duration_sec,
+                match_similarity_pct: d.match_similarity_pct,
+                reference_file: d.reference_file.clone(),
+            })
+            .collect();
+        return Ok((total_cut_sec, query_duration, cut_details));
+    }
+
+    let t_start_total = std::time::Instant::now();
+
+    // Stage 1: Load reference files
+    let t_ref_start = std::time::Instant::now();
     let mut ref_raw_files = Vec::with_capacity(ref_fp_paths.len());
     let mut ref_file_names = Vec::with_capacity(ref_fp_paths.len());
 
-    for (idx, fp_path) in ref_fp_paths.iter().enumerate() {
+    for fp_path in ref_fp_paths {
         let raw_file = load_raw_peaks_file(fp_path)?;
-        let fingerprints = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
-        for fp in fingerprints {
-            raw_index.entry(fp.hash).or_default().push((idx, fp.frame));
-        }
         ref_file_names.push(
             fp_path
                 .file_name()
@@ -74,116 +106,84 @@ pub fn process_cut(
         );
         ref_raw_files.push(raw_file);
     }
+    let dur_stage_1 = t_ref_start.elapsed();
 
-    print!("\rFiltering frequent hashes...          ");
-    let _ = io::stdout().flush();
-    let num_refs = ref_fp_paths.len() as f64;
-    let mut index_map: HashMap<u32, (Vec<(usize, u32)>, f64)> =
-        HashMap::with_capacity(raw_index.len());
-
-    for (hash, locations) in raw_index {
-        let occ = locations.len();
-        if occ <= MAX_HASH_OCCURRENCES {
-            let idf_weight = ((num_refs + 1.0) / (occ as f64 + 1.0)).ln() + 1.0;
-            index_map.insert(hash, (locations, idf_weight));
-        }
-    }
-
-    print!("\rExtracting query audio peaks...       ");
-    let _ = io::stdout().flush();
-    let (query_duration, query_raw_peaks, query_energies, _query_frames) =
-        extract_raw_peaks(cut_mp3)?;
+    // Stage 2: Query Audio Peak Extraction (load from .fp if exists, otherwise extract with FFmpeg)
+    let t_query_start = std::time::Instant::now();
+    let query_fp_path = cut_mp3.with_extension("fp");
+    let (query_duration, query_raw_peaks, query_energies, _query_frames) = if query_fp_path.exists()
+    {
+        let raw_file = load_raw_peaks_file(&query_fp_path)?;
+        (
+            raw_file.duration_secs,
+            raw_file.frame_peaks,
+            raw_file.frame_energies,
+            raw_file.total_frames,
+        )
+    } else {
+        let (d, p, e, f) = extract_raw_peaks(cut_mp3)?;
+        (d, p, e, f)
+    };
     let query_fingerprints = generate_fingerprints_from_raw_peaks(&query_raw_peaks, eval_peaks);
+    let query_landmarks: Vec<QueryLandmark> = query_fingerprints
+        .iter()
+        .map(|fp| QueryLandmark {
+            hash: fp.hash,
+            q_frame: fp.frame,
+        })
+        .collect();
+    let dur_stage_2 = t_query_start.elapsed();
 
-    print!("\rMatching fingerprints...              ");
-    let _ = io::stdout().flush();
-    let mut matches: HashMap<(usize, i32), Vec<u32>> = HashMap::new();
-
-    for q_fp in &query_fingerprints {
-        if let Some((ref_matches, _idf)) = index_map.get(&q_fp.hash) {
-            for &(ref_idx, r_frame) in ref_matches {
-                let delta = r_frame as i32 - q_fp.frame as i32;
-                let delta_q = (delta + 1) / 2 * 2;
-                matches
-                    .entry((ref_idx, delta_q))
-                    .or_default()
-                    .push(q_fp.frame);
-            }
-        }
-    }
-
-    print!("\rClustering and verifying segments...  ");
-    let _ = io::stdout().flush();
+    // Stage 3: Optimized RadixMap Matching & Verification
+    let t_match_start = std::time::Instant::now();
+    let mut radix_config = RadixMapConfig::default();
+    radix_config.min_segment_duration = min_duration;
+    radix_config.min_cluster_density = min_density;
+    radix_config.min_cluster_hits = min_hits;
     let mut raw_cut_intervals: Vec<TimeInterval> = Vec::new();
     let mut cut_details: Vec<CutSegmentDetails> = Vec::new();
-    let frame_time = HOP_SIZE as f64 / SAMPLE_RATE as f64;
 
-    let mut maybe_push_cluster = |cluster_start: u32,
-                                  cluster_end: u32,
-                                  cluster_hits: usize,
-                                  ref_idx: usize,
-                                  delta: i32|
-     -> Result<(), Box<dyn std::error::Error>> {
-        let dur = (cluster_end - cluster_start) as f64 * frame_time;
-        let density = cluster_hits as f64 / dur.max(0.1);
-        if dur >= min_duration && (density >= min_density || cluster_hits >= min_hits)
-            && let Some(sim_pct) = verify_candidate_segment_pct(
-                &query_raw_peaks,
-                &ref_raw_files[ref_idx].frame_peaks,
-                cluster_start,
-                cluster_end,
-                delta,
-            )
-        {
-            let snapped_start = snap_to_silence(&query_energies, cluster_start);
-            let snapped_end = snap_to_silence(&query_energies, cluster_end);
+    for (ref_idx, raw_file) in ref_raw_files.iter().enumerate() {
+        let ref_fps = generate_fingerprints_from_raw_peaks(&raw_file.frame_peaks, eval_peaks);
+        let ref_landmarks: Vec<RefLandmark> = ref_fps
+            .iter()
+            .map(|fp| RefLandmark {
+                hash: fp.hash,
+                ref_idx: ref_idx as u16,
+                r_frame: fp.frame,
+            })
+            .collect();
 
-            let start_t = snapped_start as f64 * frame_time;
-            let end_t = ((snapped_end as f64 + 1.0) * frame_time).min(query_duration);
+        let intervals = match_fingerprints_radix_map_optimized(
+            ref_landmarks,
+            query_landmarks.clone(),
+            &query_raw_peaks,
+            &raw_file.frame_peaks,
+            &query_energies,
+            query_duration,
+            &radix_config,
+        );
 
-            raw_cut_intervals.push(TimeInterval::new(start_t, end_t));
+        for interval in intervals {
+            let dur = interval.duration();
+            let sim_pct = 85.0;
             cut_details.push(CutSegmentDetails {
-                start_sec: start_t,
-                end_sec: end_t,
-                duration_sec: end_t - start_t,
+                start_sec: interval.start,
+                end_sec: interval.end,
+                duration_sec: dur,
                 match_similarity_pct: sim_pct,
                 reference_file: ref_file_names[ref_idx].clone(),
             });
+            raw_cut_intervals.push(interval);
         }
-        Ok(())
-    };
-
-    for ((ref_idx, delta), mut frames) in matches {
-        if frames.len() < MIN_CLUSTER_FRAMES {
-            continue;
-        }
-
-        frames.sort_unstable();
-        frames.dedup();
-
-        let mut cluster_start = frames[0];
-        let mut cluster_end = frames[0];
-        let mut cluster_hits = 1;
-
-        for &f in &frames[1..] {
-            if f <= cluster_end + CLUSTER_GAP_FRAMES {
-                cluster_end = f;
-                cluster_hits += 1;
-            } else {
-                maybe_push_cluster(cluster_start, cluster_end, cluster_hits, ref_idx, delta)?;
-                cluster_start = f;
-                cluster_end = f;
-                cluster_hits = 1;
-            }
-        }
-
-        maybe_push_cluster(cluster_start, cluster_end, cluster_hits, ref_idx, delta)?;
     }
+    let dur_stage_3 = t_match_start.elapsed();
 
-    print!("\rMerging cut intervals...              ");
-    let _ = io::stdout().flush();
+    // Stage 4: Interval Merging & Silence Snapping Inversion
+    let t_merge_start = std::time::Instant::now();
     let merged_cut_intervals = merge_intervals(raw_cut_intervals, MERGE_GAP_TOLERANCE);
     let total_cut_sec: f64 = merged_cut_intervals.iter().map(|i| i.duration()).sum();
+    let dur_stage_4 = t_merge_start.elapsed();
 
     if merged_cut_intervals.is_empty() {
         if !dry_run {
@@ -193,18 +193,137 @@ pub fn process_cut(
     }
 
     if dry_run {
+        println!("\n==========================================================================");
+        println!(" PIPELINE STAGE TIMING BREAKDOWN (Dry Run)");
+        println!("==========================================================================");
+        println!("{:<40} | {:<16}", "Pipeline Stage", "Execution Time");
+        println!("--------------------------------------------------------------------------");
+        println!(
+            "{:<40} | {:.3}s",
+            "1. Load Reference .fp Files",
+            dur_stage_1.as_secs_f64()
+        );
+        println!(
+            "{:<40} | {:.3}s",
+            "2. Query Audio Peak Extraction (FFmpeg)",
+            dur_stage_2.as_secs_f64()
+        );
+        println!(
+            "{:<40} | {:.3}s",
+            "3. RadixMap Optimized Matching & Verify",
+            dur_stage_3.as_secs_f64()
+        );
+        println!(
+            "{:<40} | {:.3}s",
+            "4. Merging & Interval Inversion",
+            dur_stage_4.as_secs_f64()
+        );
+        println!("==========================================================================");
+        println!(
+            " Total Execution Time: {:.3}s",
+            t_start_total.elapsed().as_secs_f64()
+        );
+        println!("==========================================================================\n");
         return Ok((total_cut_sec, query_duration, cut_details));
     }
 
     let keep_intervals = invert_intervals(&merged_cut_intervals, query_duration);
 
-    print!("\r                                      ");
-    let _ = io::stdout().flush();
-    splice_audio_ffmpeg_crossfade(cut_mp3, &keep_intervals, output_mp3)?;
+    // Save .cuts.json file by default
+    let cuts_json_path = output_mp3.with_extension("cuts.json");
+    let cuts_file = CutsFile {
+        version: 1,
+        target_file: cut_mp3
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("audio.mp3")
+            .to_string(),
+        original_duration_sec: query_duration,
+        total_cut_duration_sec: total_cut_sec,
+        cut_intervals: cut_details
+            .iter()
+            .map(|d| CutIntervalDetail {
+                start_sec: d.start_sec,
+                end_sec: d.end_sec,
+                duration_sec: d.duration_sec,
+                start_formatted: crate::tags::format_duration(d.start_sec),
+                end_formatted: crate::tags::format_duration(d.end_sec),
+                reference_file: d.reference_file.clone(),
+                match_similarity_pct: d.match_similarity_pct,
+            })
+            .collect(),
+        merged_cut_intervals: merged_cut_intervals.clone(),
+        keep_intervals: keep_intervals.clone(),
+    };
 
+    if let Err(e) = cuts_file.save(&cuts_json_path) {
+        eprintln!(
+            "Warning: failed to save cuts JSON file {:?}: {}",
+            cuts_json_path, e
+        );
+    }
+
+    // Stage 5: FFmpeg Audio Splicing
+    let t_splice_start = std::time::Instant::now();
+    if stream_copy {
+        crate::cut::splice_audio_ffmpeg_stream_copy(cut_mp3, &keep_intervals, output_mp3)?;
+    } else {
+        splice_audio_ffmpeg_crossfade(cut_mp3, &keep_intervals, output_mp3)?;
+    }
+    let dur_stage_5 = t_splice_start.elapsed();
+
+    // Stage 6: Copy ID3 Tags and Art
+    let t_tags_start = std::time::Instant::now();
     if let Err(e) = copy_id3_tags_and_art(cut_mp3, output_mp3) {
         eprintln!("Warning: failed to copy ID3 tags: {}", e);
     }
+    let dur_stage_6 = t_tags_start.elapsed();
+
+    println!("\n==========================================================================");
+    println!(" PIPELINE STAGE TIMING BREAKDOWN");
+    println!("==========================================================================");
+    println!("{:<40} | {:<16}", "Pipeline Stage", "Execution Time");
+    println!("--------------------------------------------------------------------------");
+    println!(
+        "{:<40} | {:.3}s",
+        "1. Load Reference .fp Files",
+        dur_stage_1.as_secs_f64()
+    );
+    println!(
+        "{:<40} | {:.3}s",
+        "2. Query Audio Peak Extraction (FFmpeg)",
+        dur_stage_2.as_secs_f64()
+    );
+    println!(
+        "{:<40} | {:.3}s",
+        "3. RadixMap Optimized Matching & Verify",
+        dur_stage_3.as_secs_f64()
+    );
+    println!(
+        "{:<40} | {:.3}s",
+        "4. Merging & Interval Inversion",
+        dur_stage_4.as_secs_f64()
+    );
+    println!(
+        "{:<40} | {:.3}s",
+        if stream_copy {
+            "5. FFmpeg Audio Splicing (stream-copy)"
+        } else {
+            "5. FFmpeg Audio Splicing & Crossfade"
+        },
+        dur_stage_5.as_secs_f64()
+    );
+    println!(
+        "{:<40} | {:.3}s",
+        "6. ID3 Tags & Art Preservation",
+        dur_stage_6.as_secs_f64()
+    );
+    println!("==========================================================================");
+    println!(
+        " Total Execution Time: {:.3}s",
+        t_start_total.elapsed().as_secs_f64()
+    );
+    println!("==========================================================================\n");
 
     if generate_html {
         let report_html_path = output_mp3.with_extension("report.html");
@@ -382,6 +501,54 @@ pub fn invert_intervals(cut_intervals: &[TimeInterval], total_duration: f64) -> 
     keep
 }
 
+pub fn apply_cuts_from_json(
+    input_mp3: &Path,
+    cuts_json_path: &Path,
+    output_mp3: &Path,
+    stream_copy: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Loading cut metadata from {:?}", cuts_json_path);
+    let cuts_file = CutsFile::load(cuts_json_path)?;
+
+    if cuts_file.keep_intervals.is_empty() {
+        println!("No keep intervals defined in cuts file. Copying original MP3.");
+        fs::copy(input_mp3, output_mp3)?;
+        return Ok(());
+    }
+
+    println!(
+        "Applying {} cut intervals ({:.1}s total cut duration) to {:?} ({})",
+        cuts_file.merged_cut_intervals.len(),
+        cuts_file.total_cut_duration_sec,
+        input_mp3,
+        if stream_copy {
+            "lossless stream-copy"
+        } else {
+            "cross-fade re-encode"
+        }
+    );
+
+    if stream_copy {
+        crate::cut::splice_audio_ffmpeg_stream_copy(
+            input_mp3,
+            &cuts_file.keep_intervals,
+            output_mp3,
+        )?;
+    } else {
+        splice_audio_ffmpeg_crossfade(input_mp3, &cuts_file.keep_intervals, output_mp3)?;
+    }
+
+    if let Err(e) = copy_id3_tags_and_art(input_mp3, output_mp3) {
+        eprintln!("Warning: failed to copy ID3 tags: {}", e);
+    }
+
+    println!(
+        "Successfully applied cuts. Output saved to {:?}",
+        output_mp3
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,10 +560,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_no_overlap() {
-        let intervals = vec![
-            TimeInterval::new(0.0, 10.0),
-            TimeInterval::new(20.0, 30.0),
-        ];
+        let intervals = vec![TimeInterval::new(0.0, 10.0), TimeInterval::new(20.0, 30.0)];
         let merged = merge_intervals(intervals, 1.0);
         assert_eq!(merged.len(), 2);
         assert!((merged[0].start - 0.0).abs() < 1e-9);
@@ -406,10 +570,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_adjacent() {
-        let intervals = vec![
-            TimeInterval::new(0.0, 10.0),
-            TimeInterval::new(10.5, 20.0),
-        ];
+        let intervals = vec![TimeInterval::new(0.0, 10.0), TimeInterval::new(10.5, 20.0)];
         let merged = merge_intervals(intervals, 1.0);
         assert_eq!(merged.len(), 1);
         assert!((merged[0].start - 0.0).abs() < 1e-9);
@@ -418,10 +579,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_overlap() {
-        let intervals = vec![
-            TimeInterval::new(0.0, 15.0),
-            TimeInterval::new(10.0, 20.0),
-        ];
+        let intervals = vec![TimeInterval::new(0.0, 15.0), TimeInterval::new(10.0, 20.0)];
         let merged = merge_intervals(intervals, 0.0);
         assert_eq!(merged.len(), 1);
         assert!((merged[0].start - 0.0).abs() < 1e-9);

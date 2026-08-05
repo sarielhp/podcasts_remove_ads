@@ -125,6 +125,8 @@ pub fn run_benchmark_all(source_dir: &PathBuf) -> Result<(), Box<dyn std::error:
                 min_hits,
                 dry_run: false,
                 generate_html: false,
+                stream_copy: false,
+                rerun: false,
             })?;
             total_cut_duration_sec += cut_sec;
             cut_segments_count += details.len();

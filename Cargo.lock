@@ -413,6 +413,7 @@ dependencies = [
  "colored",
  "id3",
  "notify",
+ "radsort",
  "rayon",
  "rustfft",
  "serde",
@@ -446,6 +447,12 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "radsort"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "019b4b213425016d7d84a153c4c73afb0946fbb4840e4eece7ba8848b9d6da22"
 
 [[package]]
 name = "rayon"

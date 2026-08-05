@@ -123,6 +123,8 @@ pub fn run_cut(
     min_duration: f64,
     dry_run: bool,
     generate_html: bool,
+    stream_copy: bool,
+    rerun: bool,
 ) -> Result<CutFileResult, Box<dyn std::error::Error>> {
     if let Some(parent) = output_mp3.parent() {
         fs::create_dir_all(parent)?;
@@ -139,6 +141,8 @@ pub fn run_cut(
         min_hits,
         dry_run,
         generate_html,
+        stream_copy,
+        rerun,
     })?;
 
     let new_duration = query_duration - cut_duration;
@@ -272,4 +276,129 @@ pub fn splice_audio_ffmpeg_crossfade(
     }
 
     Ok(())
+}
+
+/// Lossless Stream-Copy Splicing: Cuts MP3 at frame boundaries without re-encoding (ultra fast & zero loss)
+pub fn splice_audio_ffmpeg_stream_copy(
+    input_mp3: &Path,
+    keep_intervals: &[TimeInterval],
+    output_mp3: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if keep_intervals.is_empty() {
+        File::create(output_mp3)?;
+        return Ok(());
+    }
+
+    if keep_intervals.len() == 1 {
+        let s = keep_intervals[0].start;
+        let e = keep_intervals[0].end;
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-ss")
+            .arg(format!("{:.3}", s))
+            .arg("-to")
+            .arg(format!("{:.3}", e))
+            .arg("-i")
+            .arg(input_mp3)
+            .arg("-c")
+            .arg("copy")
+            .arg(output_mp3);
+        let status = run_ffmpeg_spinner(&mut cmd)?;
+        if !status.success() {
+            return Err("FFmpeg stream-copy trim failed".into());
+        }
+        return Ok(());
+    }
+
+    let work_dir = input_mp3
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".work");
+    fs::create_dir_all(&work_dir)?;
+
+    let stem = input_mp3
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("segment");
+
+    let mut part_paths = Vec::new();
+    let mut concat_list = String::new();
+
+    for (i, interval) in keep_intervals.iter().enumerate() {
+        let part_path = work_dir.join(format!("{}_part_{}.mp3", stem, i));
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-ss")
+            .arg(format!("{:.3}", interval.start))
+            .arg("-to")
+            .arg(format!("{:.3}", interval.end))
+            .arg("-i")
+            .arg(input_mp3)
+            .arg("-c")
+            .arg("copy")
+            .arg(&part_path);
+        let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+        if !status.success() {
+            return Err(format!("FFmpeg stream-copy segment #{} failed", i).into());
+        }
+        concat_list.push_str(&format!(
+            "file '{}'\n",
+            part_path.to_string_lossy().replace('\'', "'\\''")
+        ));
+        part_paths.push(part_path);
+    }
+
+    let concat_file_path = work_dir.join(format!("{}_concat.txt", stem));
+    fs::write(&concat_file_path, concat_list)?;
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
+        .arg("-i")
+        .arg(&concat_file_path)
+        .arg("-c")
+        .arg("copy")
+        .arg(output_mp3);
+
+    let status = run_ffmpeg_spinner(&mut cmd)?;
+
+    // Clean up temporary segment files & concat manifest
+    for p in part_paths {
+        let _ = fs::remove_file(p);
+    }
+    let _ = fs::remove_file(concat_file_path);
+
+    if !status.success() {
+        return Err("FFmpeg stream-copy concat failed".into());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stream_copy_single_interval() {
+        let input = Path::new("/media/podcasts/clean/Dan Snow's History Hit/A Day in the Life of a Gladiator.mp3.precut");
+        if !input.exists() {
+            return;
+        }
+        let temp_output = std::env::temp_dir().join("gladiator_stream_copy_test.mp3");
+        let intervals = vec![TimeInterval::new(10.0, 30.0)];
+        let res = splice_audio_ffmpeg_stream_copy(input, &intervals, &temp_output);
+        assert!(res.is_ok(), "Stream copy splicing must succeed");
+        assert!(temp_output.exists(), "Stream copy output file must exist");
+        let meta = fs::metadata(&temp_output).unwrap();
+        assert!(
+            meta.len() > 100_000,
+            "Stream copy file must be non-empty (got {} bytes)",
+            meta.len()
+        );
+        let _ = fs::remove_file(temp_output);
+    }
 }

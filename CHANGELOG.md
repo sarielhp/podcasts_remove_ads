@@ -4,6 +4,16 @@ All notable changes to the `podcasts_remove_ads` project are documented in this 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+* **Autoload `.fp` files for query extraction**: When a `.fp` file exists for the query file, peaks are loaded from it instead of re-extracting with FFmpeg. FFmpeg is now only used for preprocessing and final splicing.
+* **`--rerun` flag**: For `cut`, `handle-dir`, `root-dir`, and `watch` subcommands. When passed, skips analysis if `.cuts.json` exists, otherwise runs analysis first (which saves the file).
+
+### Changed
+* **Default cutting method**: Stream copy (lossless, ultra fast) is now the default. Use `--crossfade` (alias `--re-encode`) for re-encoding with crossfade transitions.
+* **CLI flag renaming**: Replaced `--stream-copy` / `--copy` with `--crossfade` / `--re-encode` to reflect the new default behavior.
+
 ## [0.3.0] - 2026-08-04
 
 ### Added
