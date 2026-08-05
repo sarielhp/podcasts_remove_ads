@@ -1,41 +1,19 @@
 #!/bin/bash
 set -e
 
-# Script to bump version by 0.0.1 only if code compiles perfectly
-
 cd "$(dirname "$0")/.."
 
-# Check if cargo build succeeds
-echo "Building project to verify compilation..."
-cargo build --release 2>&1 | tail -5
+echo "Building..."
+cargo build --release > /dev/null 2>&1 || { echo "Build failed"; exit 1; }
 
-# Check if build was successful
-if [ $? -ne 0 ]; then
-    echo "Build failed. Aborting version bump."
-    exit 1
-fi
-
-echo "Build successful. Bumping version..."
-
-# Read current version
 CURRENT_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\([^"]*\)"/\1/')
-
-# Parse version components
 MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
 MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
 PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
-
-# Increment patch version
 NEW_PATCH=$((PATCH + 1))
 NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
 
-echo "Current version: $CURRENT_VERSION"
-echo "New version: $NEW_VERSION"
-
-# Update Cargo.toml
 sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
-
-# Update CHANGELOG.md
 sed -i "s/\[Unreleased\]/[Unreleased]\n\n### Changed\n* **Version**: Bumped to $NEW_VERSION/" CHANGELOG.md
 
-echo "Version bumped to $NEW_VERSION"
+echo "$CURRENT_VERSION -> $NEW_VERSION"
