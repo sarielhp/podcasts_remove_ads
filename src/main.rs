@@ -243,6 +243,10 @@ Cut {
         /// Re-encode segments with crossfade for smooth transitions (slower, lossy)
         #[arg(long, alias = "re-encode", alias = "crossfade")]
         crossfade: bool,
+
+        /// Analyze and report cuts without modifying any files
+        #[arg(long)]
+        dry_run: bool,
     },
     /// View or modify the program configuration
     #[command(alias = "cfg")]
@@ -377,7 +381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ResortFp { dir } => {
             fp::run_resort_fp_dir(&dir)?;
         }
-        Commands::ApplyCuts { input, cuts_json, output, crossfade } => {
+        Commands::ApplyCuts { input, cuts_json, output, crossfade, dry_run } => {
             let output_path = output.unwrap_or_else(|| {
                 if input.extension().and_then(|e| e.to_str()) == Some("precut") {
                     input.with_extension("")
@@ -385,7 +389,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input.clone()
                 }
             });
-            if let Err(e) = crate::fingerprint::apply_cuts_from_json(&input, &cuts_json, &output_path, !crossfade) {
+            if let Err(e) = crate::fingerprint::apply_cuts_from_json(&input, &cuts_json, &output_path, !crossfade, dry_run) {
                 eprintln!("Error applying cuts: {}", e);
                 std::process::exit(1);
             }

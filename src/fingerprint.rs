@@ -334,6 +334,7 @@ pub fn process_cut(
             query_duration,
             total_cut_sec,
             &report_html_path,
+            env!("CARGO_PKG_VERSION"),
         ) {
             eprintln!("Warning: failed to generate HTML report: {}", e);
         }
@@ -407,7 +408,7 @@ pub fn verify_candidate_segment_pct(
         }
     }
 
-    if total_compared < MIN_VERIFY_COMPARED {
+    if total_compared < MIN_VERIFY_COMPARED || total_compared == 0 {
         return None;
     }
 
@@ -506,7 +507,25 @@ pub fn apply_cuts_from_json(
     cuts_json_path: &Path,
     output_mp3: &Path,
     stream_copy: bool,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run {
+        println!("Loading cut metadata from {:?}", cuts_json_path);
+        let cuts_file = CutsFile::load(cuts_json_path)?;
+        println!(
+            "[DRY RUN] Would apply {} cut intervals ({:.1}s total) to {:?} ({})",
+            cuts_file.merged_cut_intervals.len(),
+            cuts_file.total_cut_duration_sec,
+            input_mp3,
+            if stream_copy {
+                "lossless stream-copy"
+            } else {
+                "cross-fade re-encode"
+            }
+        );
+        return Ok(());
+    }
+
     println!("Loading cut metadata from {:?}", cuts_json_path);
     let cuts_file = CutsFile::load(cuts_json_path)?;
 

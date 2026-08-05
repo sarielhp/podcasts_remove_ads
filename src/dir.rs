@@ -675,7 +675,10 @@ pub fn walk_dir_recursive(
         return Ok(());
     }
     for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         let path = entry.path();
         if path.is_dir() {
             walk_dir_recursive(&path, results)?;

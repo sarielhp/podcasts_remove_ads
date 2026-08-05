@@ -19,6 +19,7 @@ pub fn generate_html_report(
     total_duration: f64,
     total_cut_sec: f64,
     output_html_path: &Path,
+    version: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let filename = target_mp3
         .file_name()
@@ -93,7 +94,7 @@ pub fn generate_html_report(
     <div class="container max-w-4xl">
         <div class="d-flex align-items-center justify-content-between mb-4">
             <h2>Podcasts Ad Removal Report</h2>
-            <span class="badge bg-primary fs-6">v0.2.0</span>
+            <span class="badge bg-primary fs-6">{}</span>
         </div>
 
         <div class="card p-4">
@@ -123,6 +124,7 @@ pub fn generate_html_report(
     </div>
 </body>
 </html>"#,
+        version,
         filename,
         filename,
         total_duration / 60.0,

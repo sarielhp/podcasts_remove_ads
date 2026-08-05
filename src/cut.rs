@@ -126,6 +126,9 @@ pub fn run_cut(
     stream_copy: bool,
     rerun: bool,
 ) -> Result<CutFileResult, Box<dyn std::error::Error>> {
+    if eval_peaks != 1 && eval_peaks != 2 && eval_peaks != 4 && eval_peaks != 8 {
+        return Err(format!("eval_peaks must be 1, 2, 4, or 8, got {}", eval_peaks).into());
+    }
     if let Some(parent) = output_mp3.parent() {
         fs::create_dir_all(parent)?;
     }

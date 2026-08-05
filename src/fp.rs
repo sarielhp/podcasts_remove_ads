@@ -93,13 +93,20 @@ pub fn commit_cut_result(
             .map_err(|e| format!("failed to move cut result: {}", e))
     } else {
         let _ = fs::remove_file(temp);
-        std::os::unix::fs::symlink(
-            precut
-                .file_name()
-                .expect("precut path must have a filename"),
-            original,
-        )
-        .map_err(|e| format!("failed to create symlink: {}", e))
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                precut
+                    .file_name()
+                    .expect("precut path must have a filename"),
+                original,
+            )
+            .map_err(|e| format!("failed to create symlink: {}", e))
+        }
+        #[cfg(not(unix))]
+        {
+            fs::copy(&precut, original).map_err(|e| format!("failed to copy file: {}", e))
+        }
     };
     if result.is_err() {
         let _ = fs::rename(&precut, original);

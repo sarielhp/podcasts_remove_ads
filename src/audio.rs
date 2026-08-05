@@ -77,7 +77,10 @@ pub fn extract_raw_peaks(
     if !status.success() {
         return Err(format!(
             "ffmpeg failed on {:?}: {}",
-            mp3_path.file_name().unwrap_or_default(),
+            mp3_path
+                .file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_else(|| "unknown".into()),
             ffmpeg_stderr.trim()
         )
         .into());
